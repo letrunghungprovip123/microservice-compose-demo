@@ -41,7 +41,7 @@ Backend API vẫn được publish trực tiếp ở `8001`, `8002`, `8003` đ�
 - `ports`: publish API ra host.
 - `environment`: truyền URL DB/Redis/downstream service.
 - `depends_on`: dependency startup.
-- `healthcheck`: kiểm tra PostgreSQL, Redis và 3 app services.
+- `healthcheck`: kiểm tra PostgreSQL, Redis, frontend và 3 backend services.
 - `volumes`: PostgreSQL và Redis giữ dữ liệu khi container bị recreate.
 - `networks`: `service-net`, `data-net`, `cache-net` để demo network isolation.
 - `profiles`: Adminer chỉ chạy khi bật profile `tools`.
