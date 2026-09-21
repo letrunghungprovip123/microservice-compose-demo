@@ -1,7 +1,8 @@
 # Mini Shop Microservices — Docker Compose Demo
 
-Dự án nhỏ để demo Docker Compose trong môn Microservices. Có **3 application services giao tiếp bằng REST**, không dùng message queue:
+Dự án nhỏ để demo Docker Compose trong môn Microservices. Có **1 frontend service + 3 backend microservices giao tiếp bằng REST**, không dùng message queue:
 
+- `frontend-service` — React + Ant Design, build bằng Vite và serve bằng Nginx
 - `customer-service` — FastAPI + PostgreSQL
 - `catalog-service` — Express + Redis
 - `order-service` — FastAPI, gọi REST sang `customer-service` và `catalog-service`
@@ -11,33 +12,31 @@ Ngoài ra có `adminer` (profile `tools`) để xem PostgreSQL bằng trình duy
 ## Kiến trúc
 
 ```text
-                     Host / Browser / CMD
+                         Browser
                             |
-           +----------------+----------------+
-           |                |                |
-       :8001            :8002            :8003
-           |                |                |
-  customer-service   catalog-service    order-service
-      FastAPI           Express           FastAPI
-           |                ^              /    \
-           | REST           | REST        /      \\ REST
-           +----------------+------------+        \\
-                                                   \\
-                              service-net           \\
-                                                     \\
-                          customer-service <---------+
-                          catalog-service  <---------+
-
-customer-service -- data-net --> PostgreSQL
-catalog-service  -- cache-net -> Redis
-
-order-service KHÔNG nằm trong data-net/cache-net,
-nên nó phải giao tiếp đúng kiểu microservice: qua REST API.
+                     localhost:3000
+                            |
+                  frontend-service
+                  React + Nginx proxy
+                            |
+                       service-net
+             +--------------+--------------+
+             |              |              |
+      customer-service catalog-service order-service
+             |              |          /       \\
+             |              |         / REST    \\
+          data-net       cache-net   +-----------+
+             |              |
+         PostgreSQL        Redis
 ```
+
+Backend API vẫn được publish trực tiếp ở `8001`, `8002`, `8003` để tiện demo bằng `curl`/Swagger.
+
+
 
 ## Những case Docker Compose có trong project
 
-- `build`: 3 service code tự viết đều build từ Dockerfile.
+- `build`: frontend + 3 backend service tự viết đều build từ Dockerfile.
 - `image`: PostgreSQL, Redis, Adminer dùng image có sẵn.
 - `ports`: publish API ra host.
 - `environment`: truyền URL DB/Redis/downstream service.
@@ -47,6 +46,7 @@ nên nó phải giao tiếp đúng kiểu microservice: qua REST API.
 - `networks`: `service-net`, `data-net`, `cache-net` để demo network isolation.
 - `profiles`: Adminer chỉ chạy khi bật profile `tools`.
 - service discovery: gọi `postgres`, `redis`, `customer-service`, `catalog-service` bằng service name.
+- frontend proxy: browser chỉ gọi `localhost:3000`; Nginx trong `frontend-service` proxy request sang backend bằng Docker service name, nên không cần CORS giữa browser và các backend.
 
 ## Chạy nhanh
 
@@ -59,12 +59,19 @@ docker compose up -d --build
 docker compose ps
 ```
 
+Mở giao diện:
+
+```text
+http://localhost:3000
+```
+
 Kiểm tra:
 
 ```cmd
 curl http://localhost:8001/health
 curl http://localhost:8002/health
 curl http://localhost:8003/health
+curl http://localhost:3000/health
 ```
 
 ### 1. Tạo customer
@@ -93,6 +100,16 @@ curl -X POST http://localhost:8003/orders -H "Content-Type: application/json" -d
 4. Tạo order trong memory
 
 Điểm cần nhấn mạnh khi thuyết trình: bên trong Docker network nó dùng **service name**, không dùng `localhost`.
+
+## Giao diện
+
+- Frontend React + Ant Design: http://localhost:3000
+
+Luồng request trên giao diện:
+
+```text
+Browser -> frontend-service/Nginx -> Docker service name -> backend service
+```
 
 ## Swagger / API docs
 
