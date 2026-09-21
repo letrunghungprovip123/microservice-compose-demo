@@ -100,6 +100,29 @@ services:
       - service-net
     restart: unless-stopped
 
+
+  frontend-service:
+    build:
+      context: ./frontend-service
+    ports:
+      - "3000:80"
+    depends_on:
+      customer-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - service-net
+    restart: unless-stopped
+
   adminer:
     image: adminer:latest
     ports:
