@@ -27,6 +27,7 @@ redis
 customer-service
 catalog-service
 order-service
+frontend-service
 ```
 
 `adminer` thuộc profile `tools`, nên **không được start mặc định**. Có thể xem profile bằng `docker compose config --profiles`.
@@ -45,7 +46,7 @@ Hoặc gộp:
 docker compose up -d --build
 ```
 
-Nói: 3 app service dùng `build`; Postgres/Redis dùng `image` có sẵn.
+Nói: frontend + 3 backend service dùng `build`; Postgres/Redis dùng `image` có sẵn.
 
 ## D. Quan sát resource mà Compose tạo
 
@@ -57,13 +58,34 @@ docker compose ps
 
 Tìm các resource có prefix `mini-shop`.
 
+Inspect network chính:
+
+```cmd
+docker network inspect mini-shop_service-net
+```
+
+Chứng minh frontend container gọi backend trực tiếp qua Docker network:
+
+```cmd
+docker compose exec frontend-service wget -qO- http://customer-service:8001/health
+```
+
 ## E. Test health
 
 ```cmd
 curl http://localhost:8001/health
 curl http://localhost:8002/health
 curl http://localhost:8003/health
+curl http://localhost:3000/health
 ```
+
+Mở giao diện React + Ant Design:
+
+```cmd
+start http://localhost:3000
+```
+
+Nói: Browser chỉ truy cập `localhost:3000`. Nginx trong `frontend-service` proxy sang các backend bằng Docker service name trên `service-net`.
 
 ## F. Tạo dữ liệu
 
