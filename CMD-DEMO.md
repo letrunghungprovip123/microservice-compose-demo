@@ -9,164 +9,230 @@ docker --version
 docker compose version
 ```
 
-Nói: Docker Engine/CLI thực thi container; Compose đọc application model và điều phối các resource Docker.
-
-## B. Xem Compose hiểu file như thế nào
+## B. Reset sạch trước khi trình bày
 
 ```cmd
+docker compose down -v
 copy .env.example .env
 docker compose config
-docker compose config --services
-```
-
-Kỳ vọng thấy:
-
-```text
-postgres
-redis
-customer-service
-catalog-service
-order-service
-frontend-service
-```
-
-`adminer` thuộc profile `tools`, nên **không được start mặc định**. Có thể xem profile bằng `docker compose config --profiles`.
-
-## C. Build và khởi động
-
-```cmd
-docker compose build
-docker compose up -d
-docker compose ps
-```
-
-Hoặc gộp:
-
-```cmd
 docker compose up -d --build
-```
-
-Nói: frontend + 3 backend service dùng `build`; Postgres/Redis dùng `image` có sẵn.
-
-## D. Quan sát resource mà Compose tạo
-
-```cmd
-docker network ls
-docker volume ls
 docker compose ps
 ```
 
-Tìm các resource có prefix `mini-shop`.
-
-Inspect network chính:
-
-```cmd
-docker network inspect mini-shop_service-net
-```
-
-Chứng minh frontend container gọi backend trực tiếp qua Docker network:
-
-```cmd
-docker compose exec frontend-service wget -qO- http://customer-service:8001/health
-```
-
-## E. Test health
-
-```cmd
-curl http://localhost:8001/health
-curl http://localhost:8002/health
-curl http://localhost:8003/health
-curl http://localhost:3000/health
-```
-
-Mở giao diện React + Ant Design:
+Mở frontend:
 
 ```cmd
 start http://localhost:3000
 ```
 
-Nói: Browser chỉ truy cập `localhost:3000`. Nginx trong `frontend-service` proxy sang các backend bằng Docker service name trên `service-net`.
+## C. Các service chính
 
-## F. Tạo dữ liệu
+```cmd
+docker compose config --services
+```
+
+Application services:
+
+```text
+frontend-service
+customer-service
+catalog-service
+order-service
+```
+
+Infrastructure:
+
+```text
+postgres
+redis
+adminer (profile tools)
+```
+
+## D. Test health
+
+```cmd
+curl http://localhost:3000/health
+curl http://localhost:8001/health
+curl http://localhost:8002/health
+curl http://localhost:8003/health
+```
+
+Metadata dùng trên tab Networking:
+
+```cmd
+curl http://localhost:8001/info
+curl http://localhost:8001/dependencies
+curl http://localhost:8002/dependencies
+curl http://localhost:8003/dependencies
+```
+
+## E. Demo bằng giao diện
+
+### Overview
+
+Mở tab **Overview** và giải thích:
+
+```text
+Browser
+ -> localhost:3000
+ -> frontend-service / Nginx
+ -> Docker service name
+ -> backend service
+```
+
+### Customers
+
+Tạo customer trên UI.
+
+Kiểm tra PostgreSQL:
+
+```cmd
+docker compose exec postgres psql -U shopuser -d shopdb -c "SELECT * FROM customers;"
+```
+
+### Catalog
+
+Xem stock trên UI.
+
+Kiểm tra Redis:
+
+```cmd
+docker compose exec redis redis-cli HGETALL product:1
+```
+
+### Orders
+
+Tạo order trên UI, sau đó quan sát:
+
+```text
+order xuất hiện
+stock giảm
+remaining stock thay đổi
+stats cập nhật
+```
+
+## F. Demo bằng curl nếu cần
+
+Tạo customer:
 
 ```cmd
 curl -X POST http://localhost:8001/customers -H "Content-Type: application/json" -d "{\"name\":\"An\",\"email\":\"an@example.com\"}"
 ```
 
+Products:
+
 ```cmd
 curl http://localhost:8002/products
 ```
 
-## G. Demo REST giữa microservices
+Tạo order:
 
 ```cmd
 curl -X POST http://localhost:8003/orders -H "Content-Type: application/json" -d "{\"customer_id\":1,\"product_id\":1,\"quantity\":2}"
 ```
 
-Sau đó:
+Kiểm tra:
 
 ```cmd
 curl http://localhost:8003/orders
 curl http://localhost:8002/products/1
 ```
 
-Giải thích: `order-service` gọi `customer-service:8001` và `catalog-service:8002` qua Docker DNS/service discovery.
-
-## H. Logs
+## G. Chứng minh Docker networks
 
 ```cmd
-docker compose logs
+docker network ls --filter name=mini-shop
+docker network inspect mini-shop_service-net
+docker network inspect mini-shop_data-net
+docker network inspect mini-shop_cache-net
 ```
 
-Theo dõi order service:
+Frontend container gọi Customer bằng service name:
 
 ```cmd
-docker compose logs -f order-service
+docker compose exec frontend-service wget -qO- http://customer-service:8001/health
 ```
 
-Nhấn `Ctrl+C` chỉ thoát chế độ follow log; container vẫn chạy.
-
-## I. Exec vào container
-
-Customer service:
-
-```cmd
-docker compose exec customer-service python -c "import socket; print(socket.gethostbyname('postgres'))"
-```
-
-Chứng minh hostname `postgres` được Docker DNS resolve.
-
-Kiểm tra DB trực tiếp:
-
-```cmd
-docker compose exec postgres psql -U shopuser -d shopdb -c "SELECT * FROM customers;"
-```
-
-Kiểm tra Redis:
-
-```cmd
-docker compose exec redis redis-cli KEYS "product:*"
-```
-
-## J. Chứng minh network isolation
-
-`order-service` ở `service-net`, nhưng không được nối vào `data-net` hoặc `cache-net`.
+Order resolve Customer:
 
 ```cmd
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('customer-service'))"
 ```
 
-Lệnh trên thành công.
+Customer resolve PostgreSQL:
 
-Thử resolve PostgreSQL:
+```cmd
+docker compose exec customer-service python -c "import socket; print(socket.gethostbyname('postgres'))"
+```
+
+Network isolation — lệnh sau **được kỳ vọng lỗi**:
 
 ```cmd
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
 ```
 
-Kỳ vọng lỗi DNS vì `order-service` và `postgres` không có shared network. Đây là demo rất tốt cho network isolation.
+Nói:
 
-## K. Stop / Start / Restart
+> Order không nằm trong `data-net`, nên không resolve PostgreSQL trực tiếp. Nó phải gọi Customer Service qua REST.
+
+## H. TCP connectivity
+
+Order → Customer:
+
+```cmd
+docker compose exec order-service python -c "import socket; s=socket.create_connection(('customer-service',8001),3); print(s.getpeername()); s.close()"
+```
+
+Customer → PostgreSQL:
+
+```cmd
+docker compose exec customer-service python -c "import socket; s=socket.create_connection(('postgres',5432),3); print(s.getpeername()); s.close()"
+```
+
+## I. Logs
+
+```cmd
+docker compose logs order-service
+docker compose logs -f order-service
+```
+
+Trong lúc follow log, tạo order trên UI. Nhấn `Ctrl+C` để thoát follow.
+
+## J. Port mapping
+
+```cmd
+docker compose port frontend-service 80
+docker compose port customer-service 8001
+```
+
+Nhắc lại:
+
+```text
+Host/browser -> localhost + host port
+Container     -> service name + container port
+```
+
+## K. Persistence
+
+Trước khi down, kiểm tra customer/order/stock trên UI.
+
+```cmd
+docker compose down
+docker compose up -d
+docker compose ps
+```
+
+Refresh `http://localhost:3000`.
+
+Kỳ vọng:
+
+```text
+Customer    còn   -> PostgreSQL named volume
+Redis stock còn   -> Redis AOF + named volume
+Orders      mất   -> Order in-memory
+```
+
+## L. Stop / Start / Restart
 
 ```cmd
 docker compose stop
@@ -175,55 +241,32 @@ docker compose start
 docker compose restart order-service
 ```
 
-`stop`: dừng nhưng giữ container.  
-`start`: chạy lại container có sẵn.  
-`restart`: restart container, không dùng để áp dụng mọi thay đổi cấu hình mới.
-
-## L. Demo persistence
-
-Xem customer trước:
-
-```cmd
-curl http://localhost:8001/customers
-```
-
-Sau đó:
-
-```cmd
-docker compose down
-docker compose up -d
-curl http://localhost:8001/customers
-```
-
-Customer vẫn còn vì PostgreSQL dùng named volume.
-
-Trong khi order-service lưu order **in-memory**, nên sau recreate:
-
-```cmd
-curl http://localhost:8003/orders
-```
-
-sẽ về danh sách rỗng. Đây là cách minh họa rất trực quan sự khác nhau giữa ephemeral container state và persistent volume.
-
 ## M. Adminer profile
 
 ```cmd
 docker compose --profile tools up -d
+start http://localhost:8080
 ```
 
-Mở http://localhost:8080.
+Login:
 
-Điểm demo: profile cho phép service phụ trợ chỉ chạy khi cần.
+```text
+System: PostgreSQL
+Server: postgres
+Username: shopuser
+Password: shoppass
+Database: shopdb
+```
 
-## N. Dọn môi trường
+## N. Cleanup
 
-Giữ dữ liệu:
+Giữ volume:
 
 ```cmd
 docker compose down
 ```
 
-Xóa cả volume để reset hoàn toàn:
+Reset sạch cả volume:
 
 ```cmd
 docker compose down -v
