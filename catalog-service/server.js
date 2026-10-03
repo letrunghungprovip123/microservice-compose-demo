@@ -4,6 +4,7 @@ import { createClient } from 'redis';
 const app = express();
 app.use(express.json());
 
+const serviceName = process.env.SERVICE_NAME || 'catalog-service';
 const port = Number(process.env.PORT || 8002);
 const redisUrl = process.env.REDIS_URL || 'redis://redis:6379';
 const redis = createClient({ url: redisUrl });
@@ -40,22 +41,86 @@ function normalizeProduct(data) {
   };
 }
 
-app.get('/health', async (_req, res) => {
-  try {
-    const pong = await redis.ping();
-    res.json({ status: pong === 'PONG' ? 'ok' : 'degraded', service: 'catalog-service' });
-  } catch {
-    res.status(503).json({ status: 'down', service: 'catalog-service' });
-  }
-});
-
-app.get('/products', async (_req, res) => {
+async function loadProducts() {
   const products = [];
   for (const product of seedProducts) {
     const data = await redis.hGetAll(`product:${product.id}`);
-    products.push(normalizeProduct(data));
+    const normalized = normalizeProduct(data);
+    if (normalized) products.push(normalized);
   }
-  res.json(products.filter(Boolean));
+  return products;
+}
+
+async function redisStatus() {
+  const started = performance.now();
+  try {
+    const pong = await redis.ping();
+    return {
+      name: 'redis',
+      target: 'redis:6379',
+      status: pong === 'PONG' ? 'ok' : 'degraded',
+      latency_ms: Number((performance.now() - started).toFixed(2))
+    };
+  } catch (error) {
+    return {
+      name: 'redis',
+      target: 'redis:6379',
+      status: 'down',
+      latency_ms: Number((performance.now() - started).toFixed(2)),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+app.get('/health', async (_req, res) => {
+  const dependency = await redisStatus();
+  const healthy = dependency.status === 'ok';
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
+    service: serviceName,
+    dependency
+  });
+});
+
+app.get('/info', (_req, res) => {
+  res.json({
+    service: serviceName,
+    version: '2.0.0',
+    runtime: 'Node.js / Express',
+    container_port: port,
+    persistence: 'Redis AOF + named volume',
+    networks: ['service-net', 'cache-net'],
+    depends_on: ['redis:6379'],
+    responsibility: 'Own product catalog and inventory stock'
+  });
+});
+
+app.get('/dependencies', async (_req, res) => {
+  const dependency = await redisStatus();
+  res.json({
+    service: serviceName,
+    status: dependency.status === 'ok' ? 'ok' : 'degraded',
+    dependencies: [dependency]
+  });
+});
+
+app.get('/stats', async (_req, res) => {
+  const products = await loadProducts();
+  const totalStock = products.reduce((sum, product) => sum + product.stock, 0);
+  const inventoryValue = products.reduce(
+    (sum, product) => sum + product.price * product.stock,
+    0
+  );
+  res.json({
+    service: serviceName,
+    product_count: products.length,
+    total_stock: totalStock,
+    inventory_value: Number(inventoryValue.toFixed(2))
+  });
+});
+
+app.get('/products', async (_req, res) => {
+  res.json(await loadProducts());
 });
 
 app.get('/products/:id', async (req, res) => {
@@ -80,14 +145,18 @@ app.post('/products/:id/reserve', async (req, res) => {
   }
 
   const newStock = await redis.hIncrBy(key, 'stock', -quantity);
-  res.json({ productId: product.id, reserved: quantity, remainingStock: newStock });
+  res.json({
+    productId: product.id,
+    reserved: quantity,
+    remainingStock: newStock
+  });
 });
 
 async function main() {
   await redis.connect();
   await seedIfNeeded();
   app.listen(port, '0.0.0.0', () => {
-    console.log(`catalog-service listening on ${port}`);
+    console.log(`${serviceName} listening on ${port}`);
   });
 }
 
