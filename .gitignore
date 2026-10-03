@@ -1,4 +1,8 @@
 __pycache__/
 *.pyc
 node_modules/
+dist/
+.vite/
+.env.local
+.env.*.local
 .DS_Store
