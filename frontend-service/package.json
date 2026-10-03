@@ -1,7 +1,8 @@
 {
   "name": "mini-shop-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "React + Ant Design presentation UI for the Docker Compose microservices demo",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
