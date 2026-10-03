@@ -10,8 +10,18 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <ConfigProvider
       theme={{
         token: {
-          borderRadius: 10,
-          colorPrimary: '#1677ff'
+          colorPrimary: '#1677ff',
+          colorBgLayout: '#f3f6fb',
+          borderRadius: 12,
+          fontSize: 14
+        },
+        components: {
+          Card: {
+            headerFontSize: 15
+          },
+          Table: {
+            headerBg: '#f8fafc'
+          }
         }
       }}
     >
