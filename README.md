@@ -251,6 +251,7 @@ Vite chạy tại `http://localhost:5173` và proxy `/api/customer`, `/api/catal
 
 ## Tài liệu demo
 
+- **`README-DEMO.md` — bản copy/paste nhanh toàn bộ command demo (khuyên dùng khi thuyết trình).**
 - `PRESENTATION-DEMO.md` — flow trình bày bằng UI + terminal.
 - `CMD-DEMO.md` — kịch bản terminal Windows CMD.
 - `ARCHITECTURE.md` — giải thích topology/network/persistence.
