@@ -1,502 +1,303 @@
-# README Demo — Docker Compose Microservices
+# README Demo — Copy/Paste Commands
 
-File này gom **toàn bộ lệnh cần dùng khi demo** vào một chỗ để mọi người clone project về rồi copy/paste nhanh.
+Chạy lệnh tại thư mục gốc repo.
 
-> Khuyến nghị dùng **Windows PowerShell** và chạy lệnh tại **thư mục gốc của repo**, nơi có `compose.yaml`.
-
----
-
-## 0. Clone và vào project
+## 0. Clone
 
 ```powershell
 git clone https://github.com/letrunghungprovip123/microservice-compose-demo.git
 cd .\microservice-compose-demo
 ```
 
-Kiểm tra đang đứng đúng chỗ:
-
-```powershell
-Get-ChildItem compose.yaml
-```
-
 ---
 
-# PHẦN A — Demo Dockerfile / docker run thủ công
+# CASE 1 — FE public, BE + DB private
 
-Mục đích: cho thấy một service có thể chạy bằng Dockerfile + `docker run`, nhưng khi hệ thống có nhiều dependency/network/volume thì thao tác thủ công sẽ dài và khó quản lý.
-
-## A1. Đảm bảo Compose stack chưa chiếm port 8003
-
-```powershell
-docker compose down
-```
-
-## A2. Build riêng Order Service
-
-```powershell
-docker build -t demo-order ./order-service
-```
-
-Kiểm tra image:
-
-```powershell
-docker images demo-order
-```
-
-## A3. Chạy Order Service thủ công
-
-```powershell
-docker run -d --name demo-order-container -p 8003:8003 demo-order
-```
-
-Kiểm tra container:
-
-```powershell
-docker ps
-```
-
-Health check:
-
-```powershell
-curl.exe http://localhost:8003/health
-```
-
-Kỳ vọng trả JSON có `status: ok` và `service: order-service`.
-
-## A4. Cleanup container chạy thủ công
-
-```powershell
-docker rm -f demo-order-container
-```
-
----
-
-# PHẦN B — Dựng toàn bộ hệ thống bằng Docker Compose
-
-## B1. Reset sạch dữ liệu nếu muốn demo từ đầu
-
-> Lệnh này xóa cả named volume. Chỉ dùng khi muốn reset toàn bộ customer/stock.
+## Start sạch
 
 ```powershell
 docker compose down -v
-```
-
-## B2. Build + start toàn bộ stack
-
-```powershell
 docker compose up -d --build
-```
-
-Kiểm tra:
-
-```powershell
 docker compose ps
 ```
 
-Xem service Compose nhận diện:
-
-```powershell
-docker compose config --services
-```
-
-Mở frontend:
+Mở UI:
 
 ```powershell
 Start-Process http://localhost:3000
 ```
 
-Các URL chính:
+macOS:
 
-```text
-Frontend: http://localhost:3000
-Customer Swagger: http://localhost:8001/docs
-Catalog API: http://localhost:8002/products
-Order Swagger: http://localhost:8003/docs
+```bash
+open http://localhost:3000
 ```
 
----
+## Chứng minh chỉ FE/BFF được publish
 
-# PHẦN C — Customer -> PostgreSQL
+```powershell
+curl.exe http://localhost:3000/health
+curl.exe http://localhost:3000/shop/products
+```
 
-Trên UI vào tab **Customers** và tạo ví dụ:
+Raw backend API qua FE bị chặn:
+
+```powershell
+curl.exe http://localhost:3000/api/order/orders
+```
+
+Kỳ vọng `404`.
+
+Backend host ports không mở:
+
+```powershell
+curl.exe http://localhost:8002/products
+curl.exe http://localhost:8003/orders
+```
+
+Kỳ vọng không connect.
+
+Nhưng BFF container gọi Catalog qua private Docker DNS được:
+
+```powershell
+docker compose exec frontend-bff node -e "fetch('http://catalog-service:8002/products').then(r=>r.text()).then(console.log)"
+```
+
+## Business flow
+
+Tạo order trên UI với:
 
 ```text
 Name: Nguyen Van An
 Email: an@example.com
+Product: Mechanical Keyboard
+Quantity: 2
 ```
 
-Sau đó kiểm tra trực tiếp PostgreSQL:
+Xem orders trong PostgreSQL:
 
 ```powershell
-docker compose exec postgres psql -U shopuser -d shopdb -c "SELECT * FROM customers;"
+docker compose exec postgres psql -U shopuser -d shopdb -c "SELECT id, customer_name, product_name, quantity, total, created_at FROM orders ORDER BY created_at DESC;"
 ```
 
-> Project hiện **không có bảng `orders` trong PostgreSQL**. Order được lưu in-memory trong `order-service` để demo ephemeral state.
-
-Xem order qua API:
-
-```powershell
-curl.exe http://localhost:8003/orders
-```
-
----
-
-# PHẦN D — Catalog -> Redis
-
-Xem stock product 1:
+Xem stock trong Redis:
 
 ```powershell
 docker compose exec redis redis-cli HGETALL product:1
 ```
 
-Xem toàn bộ product keys:
+## Service DNS
+
+Order thấy Catalog vì cùng `service-net`:
 
 ```powershell
-docker compose exec redis redis-cli KEYS "product:*"
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
 ```
 
-Trên UI vào tab **Orders**, chọn customer + product + quantity `2`, bấm **Create order** rồi quay lại Catalog để thấy stock giảm.
+## Datastore boundary
 
-Kiểm tra order:
+Order không thấy Redis:
 
 ```powershell
-curl.exe http://localhost:8003/orders
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 ```
 
----
-
-# PHẦN E — Docker DNS và service discovery
-
-## E1. Order resolve Customer — phải thành công
+Catalog không thấy PostgreSQL:
 
 ```powershell
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('customer-service'))"
+docker compose exec catalog-service node -e "require('dns').lookup('postgres',(e,a)=>console.log(e||a))"
 ```
 
-Ý nghĩa: `order-service` và `customer-service` cùng nằm trong `service-net`, Docker DNS resolve service name thành IP runtime.
+Hai lỗi trên là kết quả mong muốn.
 
-## E2. Frontend gọi Customer bằng Docker service name
+## Controlled network experiment
+
+Attach Order vào network của Redis:
 
 ```powershell
-docker compose exec frontend-service wget -qO- http://customer-service:8001/health
+docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 ```
 
----
-
-# PHẦN F — Chứng minh network boundary / isolation
-
-Đây là phần demo quan trọng nhất.
-
-## F1. Xem các Docker network
+Chạy lại đúng lệnh DNS:
 
 ```powershell
-docker network ls --filter name=mini-shop
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 ```
+
+Bây giờ resolve thành công.
+
+Test TCP tới Redis:
 
 ```powershell
-docker network inspect mini-shop_service-net
+docker compose exec order-service python -c "import socket; s=socket.create_connection(('redis',6379),3); print('CONNECTED ->',s.getpeername()); s.close()"
 ```
+
+Khôi phục boundary:
 
 ```powershell
-docker network inspect mini-shop_data-net
+docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 ```
+
+Chạy lại sẽ fail:
 
 ```powershell
-docker network inspect mini-shop_cache-net
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 ```
 
-## F2. Order resolve PostgreSQL — kỳ vọng THẤT BẠI
+## Inspect networks
 
 ```powershell
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
+docker network inspect mini-shop-private_service-net
+docker network inspect mini-shop-private_order-data-net
+docker network inspect mini-shop-private_catalog-data-net
 ```
 
-Giải thích: `order-service` chỉ ở `service-net`; PostgreSQL ở `data-net`. Không có shared network nên Order không resolve được hostname `postgres`.
-
-## F3. Attach nóng Order vào `data-net`
-
-Lấy container ID:
-
-```powershell
-$order = docker compose ps -q order-service
-```
-
-Kiểm tra:
-
-```powershell
-$order
-```
-
-Attach vào network:
-
-```powershell
-docker network connect mini-shop_data-net $order
-```
-
-Hoặc một dòng:
-
-```powershell
-docker network connect mini-shop_data-net $(docker compose ps -q order-service)
-```
-
-## F4. Chạy lại đúng câu lệnh DNS — lúc này phải THÀNH CÔNG
-
-```powershell
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
-```
-
-## F5. Chứng minh TCP connection thật tới PostgreSQL port 5432
-
-```powershell
-docker compose exec order-service python -c "import socket; s=socket.create_connection(('postgres',5432),3); print('CONNECTED ->',s.getpeername()); s.close()"
-```
-
-Kỳ vọng dạng:
-
-```text
-CONNECTED -> ('172.x.x.x', 5432)
-```
-
-Điểm cần nói khi trình bày:
-
-> Không sửa source code, không đổi hostname, không restart Order. Chỉ thay network membership. Trước attach thì DNS/TCP không tới PostgreSQL; sau attach thì tới được.
-
-## F6. Disconnect để trả kiến trúc về đúng thiết kế Compose
-
-```powershell
-docker network disconnect mini-shop_data-net $(docker compose ps -q order-service)
-```
-
-Test lại — kỳ vọng THẤT BẠI:
-
-```powershell
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
-```
-
----
-
-# PHẦN G — Health / dependency / metadata
-
-Health:
-
-```powershell
-curl.exe http://localhost:3000/health
-curl.exe http://localhost:8001/health
-curl.exe http://localhost:8002/health
-curl.exe http://localhost:8003/health
-```
-
-Dependency probes:
-
-```powershell
-curl.exe http://localhost:8001/dependencies
-curl.exe http://localhost:8002/dependencies
-curl.exe http://localhost:8003/dependencies
-```
-
-Metadata:
-
-```powershell
-curl.exe http://localhost:8001/info
-curl.exe http://localhost:8002/info
-curl.exe http://localhost:8003/info
-```
-
-Statistics:
-
-```powershell
-curl.exe http://localhost:8001/stats
-curl.exe http://localhost:8002/stats
-curl.exe http://localhost:8003/stats
-```
-
----
-
-# PHẦN H — Logs
-
-Xem toàn bộ log:
-
-```powershell
-docker compose logs
-```
-
-Theo dõi Order Service:
-
-```powershell
-docker compose logs -f order-service
-```
-
-Sau đó tạo order trên UI để thấy log mới. Nhấn `Ctrl+C` chỉ dừng chế độ follow log, container vẫn chạy.
-
-Frontend/Nginx logs:
-
-```powershell
-docker compose logs -f frontend-service
-```
-
----
-
-# PHẦN I — Persistence demo
-
-Trước bước này nên có:
-
-- ít nhất 1 customer;
-- ít nhất 1 order;
-- stock đã bị giảm.
-
-Kiểm tra trước:
-
-```powershell
-curl.exe http://localhost:8001/customers
-curl.exe http://localhost:8002/products
-curl.exe http://localhost:8003/orders
-```
-
-Remove container/network nhưng **giữ volume**:
+## Persistence
 
 ```powershell
 docker compose down
-```
-
-Start lại:
-
-```powershell
 docker compose up -d
-```
-
-Kiểm tra:
-
-```powershell
 docker compose ps
 ```
 
-Refresh UI hoặc chạy:
+Refresh UI. Order và stock vẫn còn vì PostgreSQL/Redis dùng named volumes.
 
-```powershell
-curl.exe http://localhost:8001/customers
-curl.exe http://localhost:8002/products
-curl.exe http://localhost:8003/orders
-```
-
-Kỳ vọng:
-
-```text
-Customer      -> còn
-Product stock -> còn
-Orders        -> [] / mất
-```
-
-Lý do:
-
-- Customer lưu PostgreSQL + `postgres-data` volume.
-- Catalog lưu Redis AOF + `redis-data` volume.
-- Order cố tình lưu trong RAM của process.
-
----
-
-# PHẦN J — Adminer (optional)
-
-Start profile tools:
-
-```powershell
-docker compose --profile tools up -d
-```
-
-Mở:
-
-```powershell
-Start-Process http://localhost:8080
-```
-
-Thông tin login:
-
-```text
-System: PostgreSQL
-Server: postgres
-Username: shopuser
-Password: shoppass
-Database: shopdb
-```
-
-`Server` phải là `postgres`, không phải `localhost`, vì Adminer cũng chạy trong container.
-
----
-
-# PHẦN K — Cleanup
-
-Giữ volume:
-
-```powershell
-docker compose down
-```
-
-Reset sạch cả volume:
+Reset sạch:
 
 ```powershell
 docker compose down -v
 ```
 
-Xóa image manual nếu không cần:
+---
+
+# CASE 2 — FE + public APIs qua HTTPS ngrok
+
+## 1. Set ngrok token
+
+Mở `.env` và điền:
+
+```env
+NGROK_AUTHTOKEN=your_real_token
+```
+
+Không push token thật lên GitHub.
+
+## 2. Start
 
 ```powershell
-docker image rm demo-order
+docker compose -f compose.public.yaml down -v
+docker compose -f compose.public.yaml up -d --build
+docker compose -f compose.public.yaml ps
+```
+
+## 3. Lấy public HTTPS URL
+
+```powershell
+docker compose -f compose.public.yaml logs ngrok
+```
+
+Tìm URL dạng:
+
+```text
+https://xxxx.ngrok.app
+```
+
+Gán nhanh trong PowerShell nếu muốn:
+
+```powershell
+$base = "https://xxxx.ngrok.app"
+```
+
+## 4. Website public
+
+```powershell
+Start-Process $base
+```
+
+## 5. Public backend APIs KHÔNG đi qua frontend
+
+Catalog:
+
+```powershell
+curl.exe "$base/api/catalog/products"
+```
+
+Order:
+
+```powershell
+curl.exe "$base/api/order/orders"
+```
+
+Gateway info:
+
+```powershell
+curl.exe "$base/gateway-info"
+```
+
+Luồng cần nói:
+
+```text
+External client
+  -> HTTPS 443
+  -> ngrok
+  -> gateway
+  -> order-service OR catalog-service
+```
+
+Frontend không nằm trong request path của các API này.
+
+## 6. Create order trực tiếp bằng public API
+
+```powershell
+curl.exe -X POST "$base/api/order/orders" -H "Content-Type: application/json" -d '{"customer_name":"Nguyen Van An","customer_email":"an@example.com","product_id":1,"quantity":1}'
+```
+
+> Nếu PowerShell của máy xử lý quote JSON khác, dùng UI hoặc Postman. Trên macOS/Linux command trên dùng được trực tiếp với `curl`.
+
+## 7. HTTPS enforcement
+
+Public URL chuẩn phải là:
+
+```text
+https://xxxx.ngrok.app
+```
+
+Gateway nhận `X-Forwarded-Proto` từ ngrok và redirect request có original scheme `http` sang HTTPS.
+
+## 8. Internal call vẫn không đi vòng ngrok
+
+```powershell
+docker compose -f compose.public.yaml exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
+```
+
+Order gọi `catalog-service:8002` trực tiếp qua `service-net`.
+
+## 9. Cleanup Case 2
+
+Giữ volume:
+
+```powershell
+docker compose -f compose.public.yaml down
+```
+
+Reset volume:
+
+```powershell
+docker compose -f compose.public.yaml down -v
 ```
 
 ---
 
-# FLOW DEMO DƯỚI 10 PHÚT — COPY THEO THỨ TỰ
+# Flow demo ngắn nên nhớ
 
-Nếu cần demo nhanh, dùng đúng thứ tự này:
+```text
+CASE 1
+up -> UI -> /shop OK -> /api raw 404 -> :8002/:8003 fail
+-> Order sees Catalog -> Order cannot see Redis
+-> network connect -> sees Redis -> disconnect -> fail
 
-```powershell
-# 1. Dockerfile / docker run manual
-docker compose down
-docker build -t demo-order ./order-service
-docker run -d --name demo-order-container -p 8003:8003 demo-order
-curl.exe http://localhost:8003/health
-docker rm -f demo-order-container
-
-# 2. Compose toàn hệ thống
-docker compose up -d --build
-docker compose ps
-Start-Process http://localhost:3000
-
-# 3. Sau khi tạo Customer trên UI — kiểm tra PostgreSQL
-docker compose exec postgres psql -U shopuser -d shopdb -c "SELECT * FROM customers;"
-
-# 4. Sau khi tạo Order trên UI — xem order + stock
-curl.exe http://localhost:8003/orders
-docker compose exec redis redis-cli HGETALL product:1
-
-# 5. Docker DNS: Order -> Customer thành công
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('customer-service'))"
-
-# 6. Boundary: Order -> PostgreSQL thất bại
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
-
-# 7. Attach Order vào data-net
-$order = docker compose ps -q order-service
-docker network connect mini-shop_data-net $order
-
-# 8. Cùng câu lệnh -> PostgreSQL thành công
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
-docker compose exec order-service python -c "import socket; s=socket.create_connection(('postgres',5432),3); print('CONNECTED ->',s.getpeername()); s.close()"
-
-# 9. Trả boundary về đúng thiết kế
-docker network disconnect mini-shop_data-net $order
-
-# 10. Persistence
-docker compose down
-docker compose up -d
-docker compose ps
+CASE 2
+set token -> public compose up -> logs ngrok
+-> open HTTPS URL -> call /api/catalog directly
+-> call /api/order directly -> explain Gateway, not Frontend
 ```
-
----
-
-## Câu chốt khi demo network boundary
-
-> Em không dùng code nghiệp vụ để chứng minh isolation. Em test DNS và TCP trực tiếp từ process bên trong `order-service`, sau đó chỉ thay đổi network membership. Khi chưa join `data-net` thì Order không thấy PostgreSQL; khi attach vào `data-net` thì cùng câu lệnh hoạt động; disconnect thì lại fail.
-
-## Câu chốt toàn bài
-
-> Dockerfile mô tả cách build từng service. Docker Compose mô tả cách toàn bộ hệ thống chạy cùng nhau: dependency, healthcheck, environment, network, service discovery và persistence. Frontend React/Ant Design chỉ trực quan hóa hệ thống; communication thật vẫn diễn ra giữa các container thông qua Docker network.
