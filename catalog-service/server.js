@@ -85,13 +85,13 @@ app.get('/health', async (_req, res) => {
 app.get('/info', (_req, res) => {
   res.json({
     service: serviceName,
-    version: '2.0.0',
+    version: '3.0.0',
     runtime: 'Node.js / Express',
     container_port: port,
     persistence: 'Redis AOF + named volume',
-    networks: ['service-net', 'cache-net'],
+    networks: ['service-net', 'catalog-data-net'],
     depends_on: ['redis:6379'],
-    responsibility: 'Own product catalog and inventory stock'
+    responsibility: 'Own product catalog, pricing and inventory stock'
   });
 });
 
@@ -137,18 +137,32 @@ app.post('/products/:id/reserve', async (req, res) => {
   }
 
   const key = `product:${req.params.id}`;
-  const data = await redis.hGetAll(key);
-  const product = normalizeProduct(data);
-  if (!product) return res.status(404).json({ detail: 'Product not found' });
-  if (product.stock < quantity) {
-    return res.status(409).json({ detail: 'Not enough stock', available: product.stock });
+  const result = await redis.eval(
+    `
+      local stock = redis.call('HGET', KEYS[1], 'stock')
+      if not stock then return {-1, -1} end
+      stock = tonumber(stock)
+      local quantity = tonumber(ARGV[1])
+      if stock < quantity then return {0, stock} end
+      local remaining = redis.call('HINCRBY', KEYS[1], 'stock', -quantity)
+      return {1, remaining}
+    `,
+    { keys: [key], arguments: [String(quantity)] }
+  );
+
+  const code = Number(result[0]);
+  const value = Number(result[1]);
+  if (code === -1) return res.status(404).json({ detail: 'Product not found' });
+  if (code === 0) {
+    return res.status(409).json({ detail: 'Not enough stock', available: value });
   }
 
-  const newStock = await redis.hIncrBy(key, 'stock', -quantity);
+  const productData = await redis.hGetAll(key);
+  const product = normalizeProduct(productData);
   res.json({
     productId: product.id,
     reserved: quantity,
-    remainingStock: newStock
+    remainingStock: value
   });
 });
 
