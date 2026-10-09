@@ -1,236 +1,235 @@
-# Architecture Notes
+# Architecture — 2 Microservices, 2 Exposure Models
 
-## 1 frontend + 3 backend microservices
+Project chỉ còn hai business microservices: **Order** và **Catalog**. Mục tiêu là tách rõ ba khái niệm: service ownership, Docker network boundary và public exposure boundary.
 
-### `frontend-service` — React + Ant Design + Nginx
-
-- Host port: `3000` → container port `80`
-- Network: `service-net`
-- Runtime state: stateless
-- Browser chỉ gọi frontend origin.
-- Nginx reverse proxy:
-  - `/api/customer/*` → `customer-service:8001`
-  - `/api/catalog/*` → `catalog-service:8002`
-  - `/api/order/*` → `order-service:8003`
-- Nginx dùng Docker embedded DNS `127.0.0.11` và service name thay vì container IP.
-
-### `customer-service` — FastAPI
-
-- Container port: `8001`
-- Networks: `service-net`, `data-net`
-- Persistence: PostgreSQL
-- Dependency: `postgres:5432`
-- Business API: create/list/get customers
-- Presentation endpoints: `/health`, `/info`, `/dependencies`, `/stats`
-
-### `catalog-service` — Express
-
-- Container port: `8002`
-- Networks: `service-net`, `cache-net`
-- Persistence: Redis AOF + named volume
-- Dependency: `redis:6379`
-- Business API: list/get/reserve product stock
-- Presentation endpoints: `/health`, `/info`, `/dependencies`, `/stats`
-
-### `order-service` — FastAPI + HTTPX
-
-- Container port: `8003`
-- Network: `service-net` only
-- Dependencies:
-  - `customer-service:8001`
-  - `catalog-service:8002`
-- Business API: list/create order
-- Order state intentionally in-memory for persistence demo
-- Presentation endpoints: `/health`, `/info`, `/dependencies`, `/stats`
-
-## Infrastructure
-
-### `postgres`
-
-- Chỉ attach `data-net`
-- Data directory `/var/lib/postgresql/data`
-- Named volume `postgres-data`
-
-### `redis`
-
-- Chỉ attach `cache-net`
-- AOF enabled
-- Named volume `redis-data`
-
-### `adminer`
-
-- Optional profile `tools`
-- Attach `data-net`
-- Truy cập PostgreSQL bằng hostname `postgres`
-
-## Complete topology
+## Business ownership
 
 ```text
-                               HOST
-                                |
-                         Browser / curl
-                                |
-                       localhost:3000
-                                |
-                    +-----------------------+
-                    |   frontend-service    |
-                    | React + Ant Design    |
-                    | Nginx reverse proxy   |
-                    +-----------+-----------+
-                                |
-                           service-net
-          +---------------------+----------------------+
-          |                     |                      |
-          v                     v                      v
- +------------------+   +------------------+   +------------------+
- | customer-service |   |  order-service   |   | catalog-service  |
- |      :8001       |<--|      :8003       |-->|      :8002       |
- +---------+--------+   +------------------+   +---------+--------+
-           |                                          |
-        data-net                                   cache-net
-           |                                          |
-           v                                          v
- +------------------+                       +------------------+
- | postgres:5432    |                       | redis:6379       |
- | postgres-data    |                       | redis-data + AOF |
- +------------------+                       +------------------+
+Order Service                          Catalog Service
+- create/list orders                   - list products
+- customer snapshot                    - price + stock
+- persist order                        - reserve stock
+       |                                      |
+       v                                      v
+   PostgreSQL                               Redis
 ```
 
-## Browser addressing vs Docker addressing
+Order gọi Catalog bằng REST. Order không đọc Redis trực tiếp; Catalog không đọc PostgreSQL trực tiếp.
 
-From host/browser:
+## Network model chung
 
 ```text
-frontend  -> localhost:3000
-customer  -> localhost:8001
-catalog   -> localhost:8002
-order     -> localhost:8003
+                     service-net
+             +-----------------------+
+             |                       |
+             v                       v
+       order-service ----------> catalog-service
+             |                       |
+      order-data-net          catalog-data-net
+             |                       |
+             v                       v
+          postgres                  redis
 ```
 
-Inside Docker networks:
+Membership:
+
+| Component | service-net | order-data-net | catalog-data-net |
+|---|:---:|:---:|:---:|
+| Order | ✅ | ✅ | ❌ |
+| Catalog | ✅ | ❌ | ✅ |
+| PostgreSQL | ❌ | ✅ | ❌ |
+| Redis | ❌ | ❌ | ✅ |
+
+Điều này hỗ trợ datastore ownership ở tầng topology: Order có route trực tiếp tới PostgreSQL của mình nhưng không có Docker service-discovery path tới Redis của Catalog.
+
+---
+
+# Case 1 — Frontend public, backend private
+
+Deployment file: `compose.yaml`.
 
 ```text
-frontend -> customer-service:8001
-frontend -> catalog-service:8002
-frontend -> order-service:8003
-customer -> postgres:5432
-catalog  -> redis:6379
-order    -> customer-service:8001
-order    -> catalog-service:8002
+                    EXTERNAL USER
+                         |
+                         v
+                +----------------+
+                | Frontend + BFF |
+                | public :3000   |
+                +-------+--------+
+                        |
+                   service-net
+                     private
+                 /             \
+                v               v
+          order-service ----> catalog-service
+               |                   |
+        order-data-net      catalog-data-net
+               |                   |
+           PostgreSQL             Redis
 ```
 
-`localhost` trong container luôn là chính container đó, không phải container khác và không phải host.
+Chỉ `frontend-bff` publish host port. Backend/datastore không có `ports:`.
 
-## Why three networks?
+### Tại sao cần BFF?
 
-### `service-net`
+React SPA chạy trong browser. Nếu Nginx public một generic route như `/api/order/* -> order-service`, external client vẫn có thể gọi raw Order API qua frontend URL bằng curl/Postman. Khi đó backend container không public trực tiếp nhưng backend API vẫn public gián tiếp.
 
-Application communication:
+Case 1 tránh điều đó bằng BFF contract riêng:
 
 ```text
-frontend
-customer
-catalog
-order
+GET  /shop/products
+GET  /shop/orders
+POST /shop/checkout
+GET  /shop/system
 ```
 
-### `data-net`
+BFF thực hiện internal REST calls server-side. Nó **không** có generic `/api/*` proxy; `/api/*` được trả 404 có chủ đích.
 
-Database boundary:
+Do đó cần phân biệt:
 
 ```text
-customer
-postgres
-adminer(optional)
+Public interface:  frontend/BFF business contract
+Private interface: native Order/Catalog APIs
 ```
 
-### `cache-net`
+External user vẫn có thể gọi `/shop/checkout` bằng HTTP client — vì đó là public frontend contract — nhưng không có route public ánh xạ trực tiếp tới toàn bộ native backend API.
 
-Catalog datastore boundary:
+---
+
+# Case 2 — Frontend và backend API đều public
+
+Deployment file: `compose.public.yaml`.
 
 ```text
-catalog
-redis
+                         INTERNET
+                            |
+                       HTTPS :443
+                            |
+                            v
+                       +---------+
+                       |  ngrok  |
+                       |  edge   |
+                       +----+----+
+                            |
+                         edge-net
+                            |
+                            v
+                       +---------+
+                       | Gateway |
+                       |  Nginx  |
+                       +----+----+
+                            |
+                       service-net
+          +-----------------+------------------+
+          |                 |                  |
+          v                 v                  v
+       frontend        order-service      catalog-service
+                           |                  |
+                    order-data-net     catalog-data-net
+                           |                  |
+                       PostgreSQL            Redis
 ```
 
-`order-service` không có shared network với PostgreSQL/Redis. Điều này cố tình ép Order giao tiếp qua microservice API thay vì bypass service boundary để đọc datastore trực tiếp.
-
-## Request flow: create customer
+Gateway routing:
 
 ```text
-Browser
- -> localhost:3000/api/customer/customers
- -> frontend Nginx
- -> customer-service:8001
- -> postgres:5432
- -> postgres-data
+/                  -> frontend-service:80
+/api/order/*       -> order-service:8003
+/api/catalog/*     -> catalog-service:8002
 ```
 
-## Request flow: create order
+Frontend và API là **các destination ngang hàng** sau gateway. Public API request không đi qua frontend service.
+
+### Public request flows
+
+Website:
 
 ```text
-Browser
- -> localhost:3000/api/order/orders
- -> frontend Nginx
- -> order-service:8003
-    -> customer-service:8001
-       -> postgres:5432
-    -> catalog-service:8002
-       -> redis:6379
- -> response to Browser
+Browser -> HTTPS 443 -> ngrok -> Gateway -> Frontend
 ```
 
-## Health and dependency model
-
-Compose startup dependencies:
+API client:
 
 ```text
-postgres healthy
-  -> customer-service can start
-
-redis healthy
-  -> catalog-service can start
-
-customer + catalog healthy
-  -> order-service can start
+Mobile/Postman/Partner -> HTTPS 443 -> ngrok -> Gateway -> Order/Catalog
 ```
 
-`frontend-service` không bắt buộc đợi backend healthy. UI có thể lên trước và hiển thị backend `DOWN`, sau đó tự refresh health/dependency status.
-
-Application presentation endpoints:
+Internal microservice call:
 
 ```text
-/health        basic/current service health
-/info          runtime, port, networks, persistence
-/dependencies  live dependency probe + latency
-/stats         dashboard counters
+Order -> service-net -> Catalog
 ```
 
-## Persistence behavior
+Order không đi vòng ra ngrok để gọi Catalog.
+
+## HTTPS rule
+
+ngrok cung cấp public TLS edge. Gateway nằm trong Docker network và listen HTTP port 80 nội bộ. ngrok forward original scheme qua `X-Forwarded-Proto`; gateway redirect public requests có scheme `http` sang `https`.
 
 ```text
-customer data
- -> PostgreSQL
- -> postgres-data named volume
- -> survives docker compose down/up
-
-catalog stock
- -> Redis AOF
- -> redis-data named volume
- -> survives docker compose down/up
-
-orders
- -> Python process memory
- -> lost after order container recreation
+PUBLIC:   HTTPS :443
+INTERNAL: ngrok tunnel -> gateway:80
 ```
 
-Điều này cố tình tạo một demo trực quan giữa **persistent volume state** và **ephemeral container/process state**.
+Điều này không có nghĩa gateway port 80 được expose ra Internet; gateway không có `ports:`.
 
-## Deliberate simplifications
+---
 
-- Frontend Nginx là reverse proxy cho demo, không phải full API gateway.
-- Không có authentication/authorization.
-- Không có tracing, message queue, saga, circuit breaker hoặc service mesh.
-- `order-service` lưu order in-memory có chủ đích.
-- Catalog stock reservation vẫn là demo đơn giản, không phải distributed transaction production-grade.
-- Backend ports vẫn publish ra host để tiện Swagger/curl; production có thể chỉ expose frontend/gateway.
+# Ba lớp boundary trong Case 2
+
+```text
+1. Internet boundary
+   Internet -> ngrok HTTPS edge
+
+2. Ingress boundary
+   ngrok -> gateway -> route được cho phép
+
+3. Service/data boundary
+   service-net / order-data-net / catalog-data-net
+```
+
+Database vẫn private ở cả hai case.
+
+# Persistence
+
+- PostgreSQL mount named volume `order-data`.
+- Redis bật AOF và mount named volume `catalog-data`.
+- `docker compose down` xóa containers/networks nhưng giữ named volumes.
+- `docker compose down -v` xóa luôn project named volumes.
+
+# Dependency graph
+
+```text
+Redis healthy ------> Catalog healthy ----+
+                                          |
+Postgres healthy ------------------------> Order healthy
+                                          |
+Catalog healthy --------------------------+
+```
+
+Ở Case 1, Frontend/BFF đợi Order + Catalog healthy. Ở Case 2, Gateway đợi Frontend + Order + Catalog healthy; ngrok đợi Gateway healthy.
+
+# Boundary proof
+
+Cùng network:
+
+```bash
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
+```
+
+Không cùng datastore network:
+
+```bash
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
+docker compose exec catalog-service node -e "require('dns').lookup('postgres',(e,a)=>console.log(e||a))"
+```
+
+Controlled experiment:
+
+```powershell
+docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
+docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
+```
+
+Biến duy nhất thay đổi là network membership; không sửa code và không restart service.
