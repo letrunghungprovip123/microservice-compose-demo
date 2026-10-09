@@ -1,4 +1,4 @@
-name: mini-shop
+name: mini-shop-private
 
 services:
   postgres:
@@ -8,50 +8,28 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-shopuser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shoppass}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - order-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shopuser} -d ${POSTGRES_DB:-shopdb}"]
       interval: 5s
       timeout: 3s
       retries: 10
     networks:
-      - data-net
+      - order-data-net
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - redis-data:/data
+      - catalog-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
     networks:
-      - cache-net
-    restart: unless-stopped
-
-  customer-service:
-    build:
-      context: ./customer-service
-    environment:
-      SERVICE_NAME: customer-service
-      DATABASE_URL: postgresql://${POSTGRES_USER:-shopuser}:${POSTGRES_PASSWORD:-shoppass}@postgres:5432/${POSTGRES_DB:-shopdb}
-    ports:
-      - "8001:8001"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-    networks:
-      - service-net
-      - data-net
+      - catalog-data-net
     restart: unless-stopped
 
   catalog-service:
@@ -61,8 +39,6 @@ services:
       SERVICE_NAME: catalog-service
       PORT: 8002
       REDIS_URL: redis://redis:6379
-    ports:
-      - "8002:8002"
     depends_on:
       redis:
         condition: service_healthy
@@ -74,7 +50,7 @@ services:
       start_period: 5s
     networks:
       - service-net
-      - cache-net
+      - catalog-data-net
     restart: unless-stopped
 
   order-service:
@@ -82,12 +58,10 @@ services:
       context: ./order-service
     environment:
       SERVICE_NAME: order-service
-      CUSTOMER_SERVICE_URL: http://customer-service:8001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-shopuser}:${POSTGRES_PASSWORD:-shoppass}@postgres:5432/${POSTGRES_DB:-shopdb}
       CATALOG_SERVICE_URL: http://catalog-service:8002
-    ports:
-      - "8003:8003"
     depends_on:
-      customer-service:
+      postgres:
         condition: service_healthy
       catalog-service:
         condition: service_healthy
@@ -99,15 +73,28 @@ services:
       start_period: 5s
     networks:
       - service-net
+      - order-data-net
     restart: unless-stopped
 
-  frontend-service:
+  frontend-bff:
     build:
       context: ./frontend-service
+      dockerfile: Dockerfile.bff
+      args:
+        VITE_DEPLOYMENT_MODE: private
+    environment:
+      PORT: 3000
+      ORDER_SERVICE_URL: http://order-service:8003
+      CATALOG_SERVICE_URL: http://catalog-service:8002
     ports:
-      - "3000:80"
+      - "3000:3000"
+    depends_on:
+      order-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost/health"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -116,23 +103,11 @@ services:
       - service-net
     restart: unless-stopped
 
-  adminer:
-    image: adminer:latest
-    ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - data-net
-    profiles:
-      - tools
-
 volumes:
-  postgres-data:
-  redis-data:
+  order-data:
+  catalog-data:
 
 networks:
   service-net:
-  data-net:
-  cache-net:
+  order-data-net:
+  catalog-data-net:
