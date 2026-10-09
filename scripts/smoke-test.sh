@@ -1,23 +1,32 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
 check() {
-  local name="$1"
-  local url="$2"
-  printf '%-24s ' "$name"
+  name="$1"
+  url="$2"
+  echo "[CHECK] $name"
   curl -fsS "$url" >/dev/null
-  echo "OK"
+  echo "[OK] $name"
 }
 
-check "frontend health" "http://localhost:3000/health"
-check "customer health" "http://localhost:8001/health"
-check "catalog health" "http://localhost:8002/health"
-check "order health" "http://localhost:8003/health"
-check "frontend -> customer" "http://localhost:3000/api/customer/health"
-check "frontend -> catalog" "http://localhost:3000/api/catalog/health"
-check "frontend -> order" "http://localhost:3000/api/order/health"
-check "customer dependencies" "http://localhost:3000/api/customer/dependencies"
-check "catalog dependencies" "http://localhost:3000/api/catalog/dependencies"
-check "order dependencies" "http://localhost:3000/api/order/dependencies"
+expect_blocked() {
+  name="$1"
+  url="$2"
+  echo "[EXPECT BLOCKED] $name"
+  if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+    echo "[FAIL] $name was unexpectedly reachable"
+    exit 1
+  fi
+  echo "[OK] blocked as expected"
+}
 
-echo "Smoke test passed."
+check "frontend BFF health" http://localhost:3000/health
+check "BFF products" http://localhost:3000/shop/products
+check "BFF orders" http://localhost:3000/shop/orders
+check "BFF system" http://localhost:3000/shop/system
+
+expect_blocked "raw order API through frontend" http://localhost:3000/api/order/orders
+expect_blocked "catalog host port" http://localhost:8002/products
+expect_blocked "order host port" http://localhost:8003/orders
+
+echo "Private-mode smoke test passed."
