@@ -1,89 +1,67 @@
-# Mini Shop Microservices — Docker Compose Demo
+# Mini Shop — Docker Compose Microservices Demo
 
-Dự án demo Docker Compose theo mô hình **1 frontend + 3 backend microservices + 2 datastore**. Mục tiêu chính là trình bày rõ Dockerfile, Compose, service discovery, healthcheck, network isolation, volume persistence và giao tiếp REST giữa các container.
+Project được thiết kế lại để tập trung vào **2 business microservices** và 2 kiểu public/private exposure khác nhau.
 
-## Thành phần
+- `order-service` — FastAPI, sở hữu order data trong PostgreSQL.
+- `catalog-service` — Express, sở hữu product/stock trong Redis.
+- `frontend-service` — React UI; chạy ở BFF mode cho Case 1 hoặc static Nginx mode cho Case 2.
+- `gateway` + `ngrok` — chỉ có trong Case 2 để public frontend và API qua một HTTPS edge.
 
-| Service | Công nghệ | Host port | Vai trò |
-|---|---|---:|---|
-| `frontend-service` | React + Ant Design + Nginx | `3000` | Giao diện trình bày, reverse proxy tới backend |
-| `customer-service` | FastAPI + PostgreSQL | `8001` | Quản lý customer |
-| `catalog-service` | Express + Redis | `8002` | Product catalog + stock |
-| `order-service` | FastAPI + HTTPX | `8003` | Gọi Customer/Catalog và tạo order |
-| `postgres` | PostgreSQL 17 | internal | Persistent customer data |
-| `redis` | Redis 7 + AOF | internal | Persistent catalog/stock state |
-| `adminer` | Adminer | `8080` | Tool tùy chọn qua profile `tools` |
+`customer-service` đã được bỏ. Thông tin customer được lưu như snapshot trong mỗi order (`customer_name`, `customer_email`) để demo tập trung vào service-to-service REST, data ownership, network boundary và ingress architecture.
 
-## Kiến trúc
+## Business flow
 
 ```text
-                              Browser
-                                 |
-                         http://localhost:3000
-                                 |
-                      +--------------------+
-                      |  frontend-service  |
-                      | React + Ant Design |
-                      |   Nginx reverse    |
-                      |       proxy        |
-                      +---------+----------+
-                                |
-                           service-net
-               +----------------+----------------+
-               |                |                |
-               v                v                v
-       customer-service   order-service    catalog-service
-          :8001              :8003             :8002
-               |              /  \               |
-               |             /    \ REST          |
-               |            v      v              |
-               +------ customer   catalog --------+
-               |
-            data-net                         cache-net
-               |                                |
-               v                                v
-          postgres:5432                     redis:6379
+Frontend
+   |
+   v
+Order Service --------------------> Catalog Service
+   |                                  |
+   |                                  |
+order-data-net                 catalog-data-net
+   |                                  |
+PostgreSQL                           Redis
 ```
 
-`order-service` **không nằm trong `data-net` hoặc `cache-net`**, vì vậy nó không truy cập trực tiếp PostgreSQL/Redis. Nó phải gọi API của `customer-service` và `catalog-service` qua `service-net`.
+Order **không truy cập Redis trực tiếp**. Catalog **không truy cập PostgreSQL trực tiếp**. Hai service giao tiếp với nhau qua `service-net`.
 
-## Frontend trình bày được gì?
+---
 
-Mở `http://localhost:3000` sẽ có 5 tab:
+# CASE 1 — Frontend public, backend private
 
-- **Overview** — health của 4 app services, số lượng customer/product/order, kiến trúc request flow.
-- **Customers** — tạo customer và xem dữ liệu đang persist trong PostgreSQL.
-- **Catalog** — xem product/stock trong Redis.
-- **Orders** — tạo order; Order Service gọi Customer + Catalog và stock giảm ngay trên UI.
-- **Networking** — xem network segmentation, service metadata và dependency probes thực tế.
-
-Browser không gọi `customer-service:8001` trực tiếp. Browser chỉ biết `localhost:3000`; Nginx trong `frontend-service` mới resolve Docker service name và proxy request:
+File mặc định: `compose.yaml`.
 
 ```text
-Browser
-  -> localhost:3000/api/customer/...
-  -> frontend-service / Nginx
-  -> customer-service:8001
+Internet / Browser
+       |
+       v
+Frontend + BFF :3000     <- PUBLIC ENTRY POINT DUY NHẤT
+       |
+       | service-net (private)
+       +-----------> Order Service -----------> Catalog Service
+                         |                           |
+                  order-data-net              catalog-data-net
+                         |                           |
+                     PostgreSQL                    Redis
 ```
 
-Nhờ vậy frontend và backend cùng origin từ góc nhìn browser, không cần bật CORS cho từng backend trong demo.
+Chỉ `frontend-bff` có `ports:`. `order-service`, `catalog-service`, PostgreSQL và Redis không publish host port.
 
-## Chạy project
+Frontend React không có generic `/api/*` reverse proxy. Browser chỉ dùng BFF contract:
 
-### Windows CMD
-
-```cmd
-copy .env.example .env
-docker compose config
-docker compose up -d --build
-docker compose ps
+```text
+GET  /shop/products
+GET  /shop/orders
+POST /shop/checkout
+GET  /shop/system
 ```
 
-### macOS / Linux
+Raw backend paths không được expose qua frontend. Ví dụ `/api/order/orders` ở Case 1 trả `404` có chủ đích.
+
+### Chạy Case 1
 
 ```bash
-cp .env.example .env
-docker compose config
+docker compose down -v
 docker compose up -d --build
 docker compose ps
 ```
@@ -94,107 +72,193 @@ Mở:
 http://localhost:3000
 ```
 
-## Health / metadata endpoints
-
-```text
-Frontend: http://localhost:3000/health
-Customer: http://localhost:8001/health
-Catalog:  http://localhost:8002/health
-Order:    http://localhost:8003/health
-```
-
-Mỗi backend còn có các endpoint dùng cho dashboard:
-
-```text
-/info
-/dependencies
-/stats
-```
-
-Ví dụ:
+Test boundary từ host:
 
 ```bash
-curl http://localhost:8001/info
-curl http://localhost:8001/dependencies
-curl http://localhost:8002/stats
-curl http://localhost:8003/dependencies
+curl http://localhost:3000/shop/products
+curl http://localhost:3000/api/order/orders
+curl http://localhost:8002/products
+curl http://localhost:8003/orders
 ```
 
-## API nghiệp vụ
+Kỳ vọng:
 
-### Customer
+- `/shop/products` thành công qua BFF.
+- `/api/order/orders` bị chặn ở BFF.
+- `localhost:8002` và `localhost:8003` không kết nối vì backend không publish port.
+
+BFF vẫn gọi backend được qua private Docker DNS:
+
+```bash
+docker compose exec frontend-bff node -e "fetch('http://catalog-service:8002/products').then(r=>r.text()).then(console.log)"
+```
+
+---
+
+# CASE 2 — Frontend + backend APIs public qua ngrok HTTPS
+
+File: `compose.public.yaml`.
 
 ```text
-POST /customers
-GET  /customers
-GET  /customers/{id}
+Internet
+   |
+HTTPS :443
+   |
+   v
+ngrok edge
+   |
+edge-net
+   |
+   v
+Gateway Nginx
+   |------------- / ----------------> frontend-service
+   |------------- /api/order/* -----> order-service
+   |------------- /api/catalog/* ---> catalog-service
+                                         |
+                         service/data networks remain private
 ```
 
-### Catalog
+Điểm quan trọng: **Frontend không nằm trên đường đi của public API**.
+
+```text
+Browser      -> ngrok -> gateway -> frontend
+Postman/App  -> ngrok -> gateway -> order/catalog API
+```
+
+Backend API là public interface, nhưng container backend vẫn không publish `8002/8003` trực tiếp ra host/Internet.
+
+### Chuẩn bị ngrok
+
+Tạo token tại tài khoản ngrok của bạn rồi đặt vào `.env`:
+
+```env
+NGROK_AUTHTOKEN=your_token_here
+```
+
+Không commit token thật lên repository.
+
+### Chạy Case 2
+
+```bash
+docker compose -f compose.public.yaml down -v
+docker compose -f compose.public.yaml up -d --build
+docker compose -f compose.public.yaml ps
+docker compose -f compose.public.yaml logs ngrok
+```
+
+Trong log ngrok lấy URL HTTPS dạng:
+
+```text
+https://xxxx.ngrok.app
+```
+
+Các public route:
+
+```text
+https://xxxx.ngrok.app/                       -> React frontend
+https://xxxx.ngrok.app/api/catalog/products  -> Catalog API
+https://xxxx.ngrok.app/api/order/orders       -> Order API
+```
+
+Gateway kiểm tra `X-Forwarded-Proto`; request public đi bằng HTTP được redirect sang HTTPS.
+
+---
+
+# Service ownership
+
+## Catalog Service
+
+API:
 
 ```text
 GET  /products
 GET  /products/{id}
 POST /products/{id}/reserve
+GET  /health
+GET  /info
+GET  /dependencies
+GET  /stats
 ```
 
-### Order
+Datastore: Redis với AOF + named volume `catalog-data`.
+
+Network membership:
+
+```text
+service-net
+catalog-data-net
+```
+
+## Order Service
+
+API:
 
 ```text
 GET  /orders
+GET  /orders/{id}
 POST /orders
+GET  /health
+GET  /info
+GET  /dependencies
+GET  /stats
 ```
 
-Khi tạo order, `order-service` thực hiện:
+Order payload:
 
-1. `GET http://customer-service:8001/customers/{id}`
-2. `GET http://catalog-service:8002/products/{id}`
-3. `POST http://catalog-service:8002/products/{id}/reserve`
-4. Lưu order vào memory và trả response cho frontend.
+```json
+{
+  "customer_name": "Nguyen Van An",
+  "customer_email": "an@example.com",
+  "product_id": 1,
+  "quantity": 2
+}
+```
 
-## Docker Compose concepts có trong project
+Order Service gọi Catalog để đọc product + reserve stock, sau đó persist order vào PostgreSQL.
 
-- **`build`** — frontend + 3 backend tự build từ Dockerfile.
-- **`image`** — PostgreSQL, Redis, Adminer dùng image có sẵn.
-- **`ports`** — publish frontend và API ra host phục vụ demo.
-- **`environment`** — truyền DB URL, Redis URL và downstream URLs.
-- **`depends_on` + `service_healthy`** — Customer đợi PostgreSQL; Catalog đợi Redis; Order đợi Customer/Catalog.
-- **`healthcheck`** — kiểm tra datastore và application container.
-- **`volumes`** — `postgres-data` và `redis-data` giữ dữ liệu qua container recreation.
-- **`networks`** — `service-net`, `data-net`, `cache-net` tạo segmentation.
-- **service discovery** — dùng `postgres`, `redis`, `customer-service`, `catalog-service`, `order-service` thay vì hard-code IP.
-- **`profiles`** — Adminer chỉ chạy khi bật profile `tools`.
+Datastore: PostgreSQL named volume `order-data`.
 
-## Chứng minh network
+Network membership:
+
+```text
+service-net
+order-data-net
+```
+
+> Demo limitation: reserve stock ở Redis và insert order ở PostgreSQL không phải một distributed transaction. Production có thể dùng Saga/outbox/idempotency tùy yêu cầu consistency.
+
+---
+
+# Network boundary demo
+
+Case 1:
 
 ```bash
-docker network ls --filter name=mini-shop
-docker network inspect mini-shop_service-net
-docker network inspect mini-shop_data-net
-docker network inspect mini-shop_cache-net
+# Order thấy Catalog vì cùng service-net
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
+
+# Order KHÔNG thấy Redis vì không thuộc catalog-data-net
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
+
+# Catalog KHÔNG thấy PostgreSQL vì không thuộc order-data-net
+docker compose exec catalog-service node -e "require('dns').lookup('postgres',(e,a)=>console.log(e||a))"
 ```
 
-Frontend gọi Customer bằng service name:
+Controlled experiment trên PowerShell:
 
-```bash
-docker compose exec frontend-service wget -qO- http://customer-service:8001/health
+```powershell
+docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
+docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
+docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 ```
 
-Order resolve Customer thành công:
+Không sửa code, không restart container; chỉ thay network membership.
 
-```bash
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('customer-service'))"
-```
+---
 
-Order resolve PostgreSQL được kỳ vọng **thất bại** vì không có shared network:
+# Persistence demo
 
-```bash
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('postgres'))"
-```
-
-## Persistence demo
-
-Tạo customer + order trên UI, sau đó:
+Tạo một order trên UI, nhớ stock hiện tại, sau đó:
 
 ```bash
 docker compose down
@@ -203,57 +267,29 @@ docker compose up -d
 
 Kỳ vọng:
 
-- Customer vẫn còn — PostgreSQL dùng `postgres-data`.
-- Product stock vẫn giữ — Redis dùng AOF + `redis-data`.
-- Orders trở về rỗng — `order-service` cố tình lưu trong memory.
+- orders vẫn còn trong PostgreSQL (`order-data`);
+- stock đã giảm vẫn còn trong Redis (`catalog-data`).
 
-Reset hoàn toàn:
+Reset sạch:
 
 ```bash
 docker compose down -v
 ```
 
-## Adminer
+---
 
-```bash
-docker compose --profile tools up -d
-```
-
-Mở `http://localhost:8080`:
+# Files quan trọng
 
 ```text
-System: PostgreSQL
-Server: postgres
-Username: shopuser
-Password: shoppass
-Database: shopdb
+compose.yaml                 Case 1 — public Frontend/BFF, private backend
+compose.public.yaml          Case 2 — ngrok + gateway + public APIs
+gateway/nginx.conf           public routing + HTTPS redirect policy
+frontend-service/Dockerfile.bff  Case 1 Node/Express BFF runtime
+frontend-service/Dockerfile      Case 2 static React/Nginx runtime
+frontend-service/server.js       BFF business contract
+ARCHITECTURE.md              giải thích kiến trúc và network boundary
+README-DEMO.md               command copy/paste cho buổi demo
+PRESENTATION-DEMO.md         flow trình bày ngắn
 ```
 
-`Server` phải là `postgres`, không phải `localhost`, vì Adminer cũng chạy trong container.
-
-## Swagger / direct API
-
-- Customer Swagger: `http://localhost:8001/docs`
-- Order Swagger: `http://localhost:8003/docs`
-- Catalog API: `http://localhost:8002/products`
-
-## Frontend local development
-
-Giữ backend chạy bằng Docker rồi:
-
-```bash
-cd frontend-service
-npm install
-npm run dev
-```
-
-Vite chạy tại `http://localhost:5173` và proxy `/api/customer`, `/api/catalog`, `/api/order` tới các backend port trên host.
-
-## Tài liệu demo
-
-- **`README-DEMO.md` — bản copy/paste nhanh toàn bộ command demo (khuyên dùng khi thuyết trình).**
-- `PRESENTATION-DEMO.md` — flow trình bày bằng UI + terminal.
-- `CMD-DEMO.md` — kịch bản terminal Windows CMD.
-- `ARCHITECTURE.md` — giải thích topology/network/persistence.
-
-> `.env` được commit có chủ đích cho classroom demo. Không commit real secrets theo cách này trong production.
+> `.env` trong repo chỉ chứa demo DB credentials và để trống `NGROK_AUTHTOKEN`. Không commit real secrets trong production.
