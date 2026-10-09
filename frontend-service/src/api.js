@@ -1,3 +1,5 @@
+export const deploymentMode = import.meta.env.VITE_DEPLOYMENT_MODE || 'private';
+
 function normalizeError(detail, status) {
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {
@@ -30,43 +32,51 @@ export async function requestJson(url, options = {}) {
   return payload;
 }
 
-export const endpoints = {
-  frontend: {
-    health: '/health',
-    info: '/info'
-  },
-  customer: {
-    health: '/api/customer/health',
-    info: '/api/customer/info',
-    dependencies: '/api/customer/dependencies',
-    stats: '/api/customer/stats',
-    customers: '/api/customer/customers'
-  },
-  catalog: {
-    health: '/api/catalog/health',
-    info: '/api/catalog/info',
-    dependencies: '/api/catalog/dependencies',
-    stats: '/api/catalog/stats',
-    products: '/api/catalog/products'
-  },
-  order: {
-    health: '/api/order/health',
-    info: '/api/order/info',
-    dependencies: '/api/order/dependencies',
-    stats: '/api/order/stats',
-    orders: '/api/order/orders'
-  }
+const privateEndpoints = {
+  products: '/shop/products',
+  orders: '/shop/orders',
+  createOrder: '/shop/checkout',
+  system: '/shop/system'
 };
 
+const publicEndpoints = {
+  products: '/api/catalog/products',
+  orders: '/api/order/orders',
+  createOrder: '/api/order/orders'
+};
+
+export const endpoints = deploymentMode === 'public' ? publicEndpoints : privateEndpoints;
+
+async function publicSystem() {
+  const urls = {
+    orderInfo: '/api/order/info',
+    orderDependencies: '/api/order/dependencies',
+    orderStats: '/api/order/stats',
+    catalogInfo: '/api/catalog/info',
+    catalogDependencies: '/api/catalog/dependencies',
+    catalogStats: '/api/catalog/stats'
+  };
+
+  const entries = await Promise.all(
+    Object.entries(urls).map(async ([key, url]) => {
+      try {
+        return [key, { ok: true, data: await requestJson(url) }];
+      } catch (error) {
+        return [key, { ok: false, error: error.message }];
+      }
+    })
+  );
+  return { mode: 'public', results: Object.fromEntries(entries) };
+}
+
 export const api = {
-  createCustomer: (payload) =>
-    requestJson(endpoints.customer.customers, {
+  products: () => requestJson(endpoints.products),
+  orders: () => requestJson(endpoints.orders),
+  createOrder: (payload) =>
+    requestJson(endpoints.createOrder, {
       method: 'POST',
       body: JSON.stringify(payload)
     }),
-  createOrder: (payload) =>
-    requestJson(endpoints.order.orders, {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    })
+  system: () =>
+    deploymentMode === 'private' ? requestJson(privateEndpoints.system) : publicSystem()
 };
