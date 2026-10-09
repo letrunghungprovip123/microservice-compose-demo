@@ -1,0 +1,137 @@
+name: mini-shop-public
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-shopdb}
+      POSTGRES_USER: ${POSTGRES_USER:-shopuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shoppass}
+    volumes:
+      - order-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shopuser} -d ${POSTGRES_DB:-shopdb}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - order-data-net
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - catalog-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - catalog-data-net
+    restart: unless-stopped
+
+  catalog-service:
+    build:
+      context: ./catalog-service
+    environment:
+      SERVICE_NAME: catalog-service
+      PORT: 8002
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8002/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - service-net
+      - catalog-data-net
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: ./order-service
+    environment:
+      SERVICE_NAME: order-service
+      DATABASE_URL: postgresql://${POSTGRES_USER:-shopuser}:${POSTGRES_PASSWORD:-shoppass}@postgres:5432/${POSTGRES_DB:-shopdb}
+      CATALOG_SERVICE_URL: http://catalog-service:8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - service-net
+      - order-data-net
+    restart: unless-stopped
+
+  frontend-service:
+    build:
+      context: ./frontend-service
+      dockerfile: Dockerfile
+      args:
+        VITE_DEPLOYMENT_MODE: public
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - service-net
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      frontend-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - edge-net
+      - service-net
+    restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: ["http", "http://gateway:80", "--log", "stdout"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?Set NGROK_AUTHTOKEN in .env before starting public mode}
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - edge-net
+    restart: unless-stopped
+
+volumes:
+  order-data:
+  catalog-data:
+
+networks:
+  edge-net:
+  service-net:
+  order-data-net:
+  catalog-data-net:
