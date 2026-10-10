@@ -11,6 +11,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distDir = path.join(__dirname, 'dist');
 
+app.set('trust proxy', true);
+
+// ngrok forwards the original public scheme in X-Forwarded-Proto.
+// Internal Docker health checks do not send this header, so they are not redirected.
+app.use((req, res, next) => {
+  const forwardedProto = req.get('x-forwarded-proto');
+  if (forwardedProto && forwardedProto.split(',')[0].trim().toLowerCase() === 'http') {
+    return res.redirect(308, `https://${req.get('host')}${req.originalUrl}`);
+  }
+  next();
+});
+
 app.use(express.json());
 
 async function fetchJson(url, options = {}) {
@@ -44,14 +56,14 @@ app.get('/health', (_req, res) => {
 app.get('/info', (_req, res) => {
   res.json({
     service: 'frontend-bff',
-    version: '3.0.0',
+    version: '3.1.0',
     runtime: 'React static bundle + Node.js/Express BFF',
     container_port: port,
     persistence: 'Stateless',
-    networks: ['service-net'],
+    networks: ['edge-net', 'service-net'],
     depends_on: ['order-service:8003', 'catalog-service:8002'],
     responsibility: 'Public frontend contract; server-side calls to private microservices',
-    exposure: 'Only BFF business endpoints are public; raw backend API paths are not proxied'
+    exposure: 'ngrok HTTPS -> BFF; only /shop business endpoints are public; raw backend API paths are not proxied'
   });
 });
 
@@ -113,7 +125,9 @@ app.use('/api', (_req, res) => {
 });
 
 app.use(express.static(distDir));
-app.get('*', (_req, res) => {
+
+// Express 5 requires a named wildcard; this form also matches the root path.
+app.get('/{*splat}', (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
 });
 
