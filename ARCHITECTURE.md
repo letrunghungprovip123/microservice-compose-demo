@@ -1,6 +1,6 @@
 # Architecture — 2 Microservices, 2 Exposure Models
 
-Project chỉ còn hai business microservices: **Order** và **Catalog**. Mục tiêu là tách rõ ba khái niệm: service ownership, Docker network boundary và public exposure boundary.
+Project chỉ còn hai business microservices: **Order** và **Catalog**. Mục tiêu là tách rõ service ownership, Docker network boundary và public exposure boundary.
 
 ## Business ownership
 
@@ -31,8 +31,6 @@ Order gọi Catalog bằng REST. Order không đọc Redis trực tiếp; Catalo
           postgres                  redis
 ```
 
-Membership:
-
 | Component | service-net | order-data-net | catalog-data-net |
 |---|:---:|:---:|:---:|
 | Order | ✅ | ✅ | ❌ |
@@ -44,35 +42,55 @@ Membership:
 
 ---
 
-# Case 1 — Frontend public, backend private
+# Case 1 — ngrok public edge, frontend/BFF public, backend private
 
 Deployment file: `compose.yaml`.
 
 ```text
-                    EXTERNAL USER
-                         |
-                         v
-                +----------------+
-                | Frontend + BFF |
-                | public :3000   |
-                +-------+--------+
-                        |
-                   service-net
-                     private
-                 /             \
-                v               v
-          order-service ----> catalog-service
-               |                   |
-        order-data-net      catalog-data-net
-               |                   |
-           PostgreSQL             Redis
+                         INTERNET
+                            |
+                       HTTPS :443
+                            |
+                            v
+                       +---------+
+                       |  ngrok  |
+                       +----+----+
+                            |
+                         edge-net
+                            |
+                            v
+                    +---------------+
+                    | Frontend/BFF  |
+                    | public app    |
+                    +-------+-------+
+                            |
+                       service-net
+                         private
+                    /               \
+                   v                 v
+            order-service -----> catalog-service
+                 |                    |
+          order-data-net       catalog-data-net
+                 |                    |
+             PostgreSQL              Redis
 ```
 
-Chỉ `frontend-bff` publish host port. Backend/datastore không có `ports:`.
+Không service nào publish host port. Ngrok là public entry point duy nhất.
+
+Network membership bổ sung của Case 1:
+
+| Component | edge-net | service-net |
+|---|:---:|:---:|
+| ngrok | ✅ | ❌ |
+| frontend-bff | ✅ | ✅ |
+| order-service | ❌ | ✅ |
+| catalog-service | ❌ | ✅ |
+
+Điểm này làm public exposure boundary rõ hơn: ngrok chỉ có route tới BFF qua `edge-net`; backend chỉ nằm sau BFF trên `service-net`.
 
 ### Tại sao cần BFF?
 
-React SPA chạy trong browser. Nếu Nginx public một generic route như `/api/order/* -> order-service`, external client vẫn có thể gọi raw Order API qua frontend URL bằng curl/Postman. Khi đó backend container không public trực tiếp nhưng backend API vẫn public gián tiếp.
+React SPA chạy trong browser. Nếu public một generic route như `/api/order/* -> order-service`, external client vẫn có thể gọi raw Order API qua public URL bằng curl/Postman. Khi đó backend container không public trực tiếp nhưng backend API vẫn public gián tiếp.
 
 Case 1 tránh điều đó bằng BFF contract riêng:
 
@@ -85,18 +103,26 @@ GET  /shop/system
 
 BFF thực hiện internal REST calls server-side. Nó **không** có generic `/api/*` proxy; `/api/*` được trả 404 có chủ đích.
 
-Do đó cần phân biệt:
+Do đó:
 
 ```text
-Public interface:  frontend/BFF business contract
+Public interface:  ngrok -> frontend/BFF business contract
 Private interface: native Order/Catalog APIs
 ```
 
-External user vẫn có thể gọi `/shop/checkout` bằng HTTP client — vì đó là public frontend contract — nhưng không có route public ánh xạ trực tiếp tới toàn bộ native backend API.
+External user vẫn có thể gọi `/shop/checkout` bằng HTTP client vì đó là public frontend contract. Điều bị ẩn là native backend contract, không phải toàn bộ HTTP interaction của frontend.
+
+Không có host-port bypass:
+
+```text
+localhost:3000  ❌
+localhost:8002  ❌
+localhost:8003  ❌
+```
 
 ---
 
-# Case 2 — Frontend và backend API đều public
+# Case 2 — ngrok public edge + Gateway + public backend APIs
 
 Deployment file: `compose.public.yaml`.
 
@@ -108,7 +134,6 @@ Deployment file: `compose.public.yaml`.
                             v
                        +---------+
                        |  ngrok  |
-                       |  edge   |
                        +----+----+
                             |
                          edge-net
@@ -162,33 +187,39 @@ Order -> service-net -> Catalog
 
 Order không đi vòng ra ngrok để gọi Catalog.
 
-## HTTPS rule
+---
 
-ngrok cung cấp public TLS edge. Gateway nằm trong Docker network và listen HTTP port 80 nội bộ. ngrok forward original scheme qua `X-Forwarded-Proto`; gateway redirect public requests có scheme `http` sang `https`.
+# So sánh public exposure boundary
 
 ```text
-PUBLIC:   HTTPS :443
-INTERNAL: ngrok tunnel -> gateway:80
+CASE 1
+Internet -> ngrok -> Frontend/BFF -> private Order/Catalog
+
+CASE 2
+Internet -> ngrok -> Gateway -> Frontend
+                            -> Order API
+                            -> Catalog API
 ```
 
-Điều này không có nghĩa gateway port 80 được expose ra Internet; gateway không có `ports:`.
+Cả hai case đều dùng ngrok làm HTTPS public edge. Điểm khác biệt là **thành phần nhận tunnel và contract được expose**:
+
+- Case 1: ngrok tunnel thẳng vào BFF; native backend API private.
+- Case 2: ngrok tunnel vào Gateway; Gateway intentionally expose frontend và native backend APIs.
 
 ---
 
-# Ba lớp boundary trong Case 2
+# HTTPS rule
+
+Ngrok cung cấp public TLS edge. Traffic public dùng HTTPS/443. Tunnel nội bộ có thể forward HTTP tới container đích mà không đồng nghĩa port HTTP đó được expose ra Internet.
 
 ```text
-1. Internet boundary
-   Internet -> ngrok HTTPS edge
-
-2. Ingress boundary
-   ngrok -> gateway -> route được cho phép
-
-3. Service/data boundary
-   service-net / order-data-net / catalog-data-net
+Case 1 public: HTTPS -> ngrok -> frontend-bff:3000 (internal)
+Case 2 public: HTTPS -> ngrok -> gateway:80 (internal)
 ```
 
-Database vẫn private ở cả hai case.
+Case 2 Gateway còn kiểm tra `X-Forwarded-Proto` và redirect original HTTP requests sang HTTPS.
+
+---
 
 # Persistence
 
@@ -196,6 +227,7 @@ Database vẫn private ở cả hai case.
 - Redis bật AOF và mount named volume `catalog-data`.
 - `docker compose down` xóa containers/networks nhưng giữ named volumes.
 - `docker compose down -v` xóa luôn project named volumes.
+- Ngrok URL có thể thay đổi khi tunnel/container được tạo lại.
 
 # Dependency graph
 
@@ -207,7 +239,17 @@ Postgres healthy ------------------------> Order healthy
 Catalog healthy --------------------------+
 ```
 
-Ở Case 1, Frontend/BFF đợi Order + Catalog healthy. Ở Case 2, Gateway đợi Frontend + Order + Catalog healthy; ngrok đợi Gateway healthy.
+Case 1:
+
+```text
+Order + Catalog healthy -> Frontend/BFF healthy -> ngrok starts
+```
+
+Case 2:
+
+```text
+Frontend + Order + Catalog healthy -> Gateway healthy -> ngrok starts
+```
 
 # Boundary proof
 
@@ -226,7 +268,7 @@ docker compose exec catalog-service node -e "require('dns').lookup('postgres',(e
 
 Controlled experiment:
 
-```powershell
+```bash
 docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
