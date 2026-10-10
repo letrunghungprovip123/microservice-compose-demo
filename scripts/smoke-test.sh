@@ -1,6 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
+BASE_URL="${1:-${BASE_URL:-}}"
+
+if [ -z "$BASE_URL" ]; then
+  echo "Usage: ./scripts/smoke-test.sh https://xxxx.ngrok.app"
+  echo "or set BASE_URL=https://xxxx.ngrok.app"
+  exit 2
+fi
+
 check() {
   name="$1"
   url="$2"
@@ -20,13 +28,15 @@ expect_blocked() {
   echo "[OK] blocked as expected"
 }
 
-check "frontend BFF health" http://localhost:3000/health
-check "BFF products" http://localhost:3000/shop/products
-check "BFF orders" http://localhost:3000/shop/orders
-check "BFF system" http://localhost:3000/shop/system
+check "frontend BFF health through ngrok" "$BASE_URL/health"
+check "BFF products through ngrok" "$BASE_URL/shop/products"
+check "BFF orders through ngrok" "$BASE_URL/shop/orders"
+check "BFF system through ngrok" "$BASE_URL/shop/system"
 
-expect_blocked "raw order API through frontend" http://localhost:3000/api/order/orders
-expect_blocked "catalog host port" http://localhost:8002/products
-expect_blocked "order host port" http://localhost:8003/orders
+expect_blocked "raw order API through public BFF" "$BASE_URL/api/order/orders"
+expect_blocked "raw catalog API through public BFF" "$BASE_URL/api/catalog/products"
+expect_blocked "frontend host port bypass" "http://localhost:3000"
+expect_blocked "catalog host port" "http://localhost:8002/products"
+expect_blocked "order host port" "http://localhost:8003/orders"
 
-echo "Private-mode smoke test passed."
+echo "Private-mode ngrok smoke test passed."
