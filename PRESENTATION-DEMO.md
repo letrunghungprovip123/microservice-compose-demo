@@ -1,6 +1,6 @@
 # Presentation Demo — 2 Microservices / 2 Architecture Cases
 
-Mục tiêu: chứng minh hai deployment model khác nhau, không phải chỉ “thêm ngrok”.
+Mục tiêu: chứng minh hai deployment model khác nhau dù **cả hai đều dùng ngrok HTTPS**.
 
 ## 0. Business architecture
 
@@ -14,9 +14,11 @@ Nói:
 
 > Em bỏ Customer Service để tập trung vào hai business service có ownership rõ: Order sở hữu order data trong PostgreSQL, Catalog sở hữu product/stock trong Redis. Order muốn reserve stock phải gọi Catalog API, không truy cập Redis trực tiếp.
 
+Trước demo: đặt `NGROK_AUTHTOKEN` trong `.env`.
+
 ---
 
-# CASE 1 — Frontend public, backend private
+# CASE 1 — ngrok -> Frontend/BFF, backend private
 
 ## 1. Start
 
@@ -24,38 +26,45 @@ Nói:
 docker compose down -v
 docker compose up -d --build
 docker compose ps
+docker compose logs ngrok
 ```
 
-Mở `http://localhost:3000`.
+Lấy URL `https://xxxx.ngrok.app`.
 
 Nói:
 
-> Chỉ Frontend/BFF publish port 3000. Order, Catalog, PostgreSQL và Redis chỉ tồn tại trong private Docker networks.
+> Case 1 cũng dùng ngrok làm HTTPS public edge. Nhưng ngrok chỉ tunnel vào Frontend/BFF. Order, Catalog và datastore không publish host port và không được expose native API ra ngoài.
 
 ## 2. Chứng minh exposure boundary
 
 ```bash
-curl http://localhost:3000/shop/products
+BASE="https://xxxx.ngrok.app"
+curl "$BASE/shop/products"
+curl -i "$BASE/api/order/orders"
+curl -i "$BASE/api/catalog/products"
 ```
 
-Thành công qua BFF.
+Kỳ vọng `/shop/products` thành công, còn `/api/*` trả `404`.
+
+Chứng minh không có host-port bypass:
 
 ```bash
-curl http://localhost:3000/api/order/orders
-```
-
-Kỳ vọng `404`.
-
-```bash
+curl http://localhost:3000
 curl http://localhost:8002/products
 curl http://localhost:8003/orders
 ```
 
-Kỳ vọng không connect.
+Đều phải không connect.
+
+Nhưng BFF gọi Catalog nội bộ được:
+
+```bash
+docker compose exec frontend-bff node -e "fetch('http://catalog-service:8002/products').then(r=>r.text()).then(console.log)"
+```
 
 Nói:
 
-> Case 1 không dùng generic `/api` proxy. External client chỉ thấy frontend/BFF contract; native backend APIs không được expose.
+> Public path là `Internet -> ngrok -> BFF`. BFF mới gọi backend qua private `service-net`. Native backend API không public.
 
 ## 3. Business flow
 
@@ -86,82 +95,69 @@ Nói:
 
 ## 4. Network boundary
 
-Order thấy Catalog:
-
 ```bash
+# Order thấy Catalog
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
-```
 
-Order không thấy Redis:
-
-```bash
+# Order không thấy Redis
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
-```
 
-Catalog không thấy PostgreSQL:
-
-```bash
+# Catalog không thấy PostgreSQL
 docker compose exec catalog-service node -e "require('dns').lookup('postgres',(e,a)=>console.log(e||a))"
 ```
 
-## 5. Controlled experiment
+Nếu cần demo sâu:
 
-PowerShell:
-
-```powershell
+```bash
 docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 ```
 
-Nói:
-
-> Em không sửa code và không restart container. Em chỉ thay network membership; khả năng service discovery thay đổi theo network.
-
----
-
-# CASE 2 — Frontend + API public qua HTTPS ngrok
-
-Trước demo cần điền `NGROK_AUTHTOKEN` trong `.env`.
-
-## 6. Start public architecture
+Xong Case 1:
 
 ```bash
 docker compose down
+```
+
+---
+
+# CASE 2 — ngrok -> Gateway -> Frontend + public backend APIs
+
+## 5. Start public architecture
+
+```bash
+docker compose -f compose.public.yaml down -v
 docker compose -f compose.public.yaml up -d --build
 docker compose -f compose.public.yaml ps
 docker compose -f compose.public.yaml logs ngrok
 ```
 
-Lấy URL dạng `https://xxxx.ngrok.app`.
+Lấy URL mới dạng `https://xxxx.ngrok.app`.
 
 Nói:
 
-> Case 2 thay đổi public exposure boundary. ngrok là HTTPS edge, sau đó Gateway quyết định request đi tới frontend hay backend API.
+> Case 2 vẫn dùng ngrok, nhưng tunnel đích là Gateway chứ không phải BFF. Gateway quyết định request đi tới frontend hay native backend API.
 
-## 7. Chứng minh frontend và API là hai destination ngang hàng
+## 6. Chứng minh frontend và API là destination ngang hàng
 
-Website:
+```bash
+BASE="https://xxxx.ngrok.app"
+curl "$BASE/api/catalog/products"
+curl "$BASE/api/order/orders"
+curl "$BASE/gateway-info"
+curl -i "$BASE/api/catalog/products"
+```
+
+Kỳ vọng header có:
 
 ```text
-https://xxxx.ngrok.app/
-```
-
-Catalog public API:
-
-```bash
-curl https://xxxx.ngrok.app/api/catalog/products
-```
-
-Order public API:
-
-```bash
-curl https://xxxx.ngrok.app/api/order/orders
+X-Demo-Route: gateway -> catalog-service:8002
 ```
 
 Nói:
 
-> Hai API request này đi ngrok -> Gateway -> backend. Frontend service không nằm trên đường request.
+> Request API đi `ngrok -> Gateway -> backend`, không đi qua frontend service.
 
 Flow:
 
@@ -170,7 +166,7 @@ Browser -> HTTPS 443 -> ngrok -> Gateway -> Frontend
 Postman -> HTTPS 443 -> ngrok -> Gateway -> Order/Catalog
 ```
 
-## 8. Database vẫn private
+## 7. Database vẫn private
 
 ```bash
 docker compose -f compose.public.yaml exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
@@ -180,4 +176,4 @@ Vẫn fail vì public API không đồng nghĩa public datastore.
 
 ## Câu kết
 
-> Case 1 chỉ public frontend application contract và giữ native backend APIs private. Case 2 intentionally public backend APIs cho external clients, nhưng mọi public traffic phải qua HTTPS ngrok và một Gateway riêng. Ở cả hai case, datastore ownership và Docker network segmentation vẫn được giữ nguyên.
+> Cả hai case đều dùng ngrok làm HTTPS edge. Case 1 ngrok chỉ expose Frontend/BFF contract, còn native backend APIs private. Case 2 ngrok đi vào Gateway và Gateway intentionally expose cả frontend lẫn backend APIs. Vì vậy khác biệt nằm ở public exposure boundary, không phải chỉ ở việc có thêm ngrok.
