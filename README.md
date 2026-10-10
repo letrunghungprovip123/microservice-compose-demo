@@ -1,20 +1,18 @@
 # Mini Shop — Docker Compose Microservices Demo
 
-Project được thiết kế lại để tập trung vào **2 business microservices** và 2 kiểu public/private exposure khác nhau.
+Project tập trung vào **2 business microservices** và **2 kiểu public exposure khác nhau**.
 
 - `order-service` — FastAPI, sở hữu order data trong PostgreSQL.
 - `catalog-service` — Express, sở hữu product/stock trong Redis.
 - `frontend-service` — React UI; chạy ở BFF mode cho Case 1 hoặc static Nginx mode cho Case 2.
-- `gateway` + `ngrok` — chỉ có trong Case 2 để public frontend và API qua một HTTPS edge.
+- `ngrok` — public HTTPS edge ở **cả hai case**.
+- `gateway` — chỉ có trong Case 2 để public frontend và native backend APIs qua cùng một ingress.
 
 `customer-service` đã được bỏ. Thông tin customer được lưu như snapshot trong mỗi order (`customer_name`, `customer_email`) để demo tập trung vào service-to-service REST, data ownership, network boundary và ingress architecture.
 
 ## Business flow
 
 ```text
-Frontend
-   |
-   v
 Order Service --------------------> Catalog Service
    |                                  |
    |                                  |
@@ -25,29 +23,46 @@ PostgreSQL                           Redis
 
 Order **không truy cập Redis trực tiếp**. Catalog **không truy cập PostgreSQL trực tiếp**. Hai service giao tiếp với nhau qua `service-net`.
 
+## Chuẩn bị ngrok cho cả hai case
+
+Tạo ngrok authtoken rồi đặt vào `.env`:
+
+```env
+NGROK_AUTHTOKEN=your_real_token
+```
+
+Không commit token thật lên repository.
+
 ---
 
-# CASE 1 — Frontend public, backend private
+# CASE 1 — ngrok -> Frontend/BFF, backend private
 
 File mặc định: `compose.yaml`.
 
 ```text
-Internet / Browser
-       |
-       v
-Frontend + BFF :3000     <- PUBLIC ENTRY POINT DUY NHẤT
-       |
-       | service-net (private)
-       +-----------> Order Service -----------> Catalog Service
-                         |                           |
-                  order-data-net              catalog-data-net
-                         |                           |
-                     PostgreSQL                    Redis
+Internet
+   |
+HTTPS :443
+   |
+   v
+ngrok
+   |
+edge-net
+   |
+   v
+Frontend + BFF
+   |
+service-net (private)
+   +-----------> Order Service -----------> Catalog Service
+                      |                           |
+               order-data-net              catalog-data-net
+                      |                           |
+                  PostgreSQL                    Redis
 ```
 
-Chỉ `frontend-bff` có `ports:`. `order-service`, `catalog-service`, PostgreSQL và Redis không publish host port.
+**Không container nào publish host port.** Ngrok là public entry point duy nhất. `frontend-bff` nằm trên `edge-net` để nhận tunnel từ ngrok và trên `service-net` để gọi Order/Catalog. Ngrok **không** nằm trên `service-net`, nên nó không có đường Docker-network trực tiếp tới backend.
 
-Frontend React không có generic `/api/*` reverse proxy. Browser chỉ dùng BFF contract:
+Browser chỉ dùng BFF contract:
 
 ```text
 GET  /shop/products
@@ -56,7 +71,7 @@ POST /shop/checkout
 GET  /shop/system
 ```
 
-Raw backend paths không được expose qua frontend. Ví dụ `/api/order/orders` ở Case 1 trả `404` có chủ đích.
+BFF không có generic `/api/*` reverse proxy. Raw backend paths như `/api/order/orders` trả `404` có chủ đích.
 
 ### Chạy Case 1
 
@@ -64,38 +79,41 @@ Raw backend paths không được expose qua frontend. Ví dụ `/api/order/orde
 docker compose down -v
 docker compose up -d --build
 docker compose ps
+docker compose logs ngrok
 ```
 
-Mở:
+Trong log ngrok lấy URL dạng:
 
 ```text
-http://localhost:3000
+https://xxxx.ngrok.app
 ```
 
-Test boundary từ host:
+Ví dụ:
 
 ```bash
-curl http://localhost:3000/shop/products
-curl http://localhost:3000/api/order/orders
-curl http://localhost:8002/products
-curl http://localhost:8003/orders
+BASE="https://xxxx.ngrok.app"
+curl "$BASE/health"
+curl "$BASE/shop/products"
+curl -i "$BASE/api/order/orders"
 ```
 
 Kỳ vọng:
 
-- `/shop/products` thành công qua BFF.
-- `/api/order/orders` bị chặn ở BFF.
-- `localhost:8002` và `localhost:8003` không kết nối vì backend không publish port.
+- `/shop/products` thành công qua ngrok -> BFF.
+- `/api/order/orders` trả `404` ở BFF.
+- `localhost:3000`, `localhost:8002`, `localhost:8003` đều không kết nối vì không service nào publish host port.
 
-BFF vẫn gọi backend được qua private Docker DNS:
+BFF vẫn gọi backend qua private Docker DNS:
 
 ```bash
 docker compose exec frontend-bff node -e "fetch('http://catalog-service:8002/products').then(r=>r.text()).then(console.log)"
 ```
 
+Case 1 therefore public **frontend/BFF contract**, nhưng giữ native Order/Catalog APIs private.
+
 ---
 
-# CASE 2 — Frontend + backend APIs public qua ngrok HTTPS
+# CASE 2 — ngrok -> Gateway -> Frontend + public backend APIs
 
 File: `compose.public.yaml`.
 
@@ -105,7 +123,7 @@ Internet
 HTTPS :443
    |
    v
-ngrok edge
+ngrok
    |
 edge-net
    |
@@ -125,17 +143,7 @@ Browser      -> ngrok -> gateway -> frontend
 Postman/App  -> ngrok -> gateway -> order/catalog API
 ```
 
-Backend API là public interface, nhưng container backend vẫn không publish `8002/8003` trực tiếp ra host/Internet.
-
-### Chuẩn bị ngrok
-
-Tạo token tại tài khoản ngrok của bạn rồi đặt vào `.env`:
-
-```env
-NGROK_AUTHTOKEN=your_token_here
-```
-
-Không commit token thật lên repository.
+Backend API là public interface, nhưng backend containers vẫn không publish `8002/8003` trực tiếp ra host/Internet.
 
 ### Chạy Case 2
 
@@ -146,7 +154,7 @@ docker compose -f compose.public.yaml ps
 docker compose -f compose.public.yaml logs ngrok
 ```
 
-Trong log ngrok lấy URL HTTPS dạng:
+Lấy URL HTTPS dạng:
 
 ```text
 https://xxxx.ngrok.app
@@ -161,6 +169,25 @@ https://xxxx.ngrok.app/api/order/orders       -> Order API
 ```
 
 Gateway kiểm tra `X-Forwarded-Proto`; request public đi bằng HTTP được redirect sang HTTPS.
+
+---
+
+# Khác nhau cốt lõi giữa hai case
+
+```text
+CASE 1
+Internet -> HTTPS ngrok -> Frontend/BFF -> private Order/Catalog
+
+CASE 2
+Internet -> HTTPS ngrok -> Gateway -> Frontend
+                                \-> Order API
+                                \-> Catalog API
+```
+
+Cả hai đều có ngrok. Khác biệt không phải "có/không có ngrok", mà là **public exposure boundary**:
+
+- Case 1: external client chỉ thấy frontend/BFF business contract.
+- Case 2: external client được gọi native backend APIs thông qua Gateway.
 
 ---
 
@@ -218,13 +245,6 @@ Order Service gọi Catalog để đọc product + reserve stock, sau đó persi
 
 Datastore: PostgreSQL named volume `order-data`.
 
-Network membership:
-
-```text
-service-net
-order-data-net
-```
-
 > Demo limitation: reserve stock ở Redis và insert order ở PostgreSQL không phải một distributed transaction. Production có thể dùng Saga/outbox/idempotency tùy yêu cầu consistency.
 
 ---
@@ -244,9 +264,9 @@ docker compose exec order-service python -c "import socket; print(socket.gethost
 docker compose exec catalog-service node -e "require('dns').lookup('postgres',(e,a)=>console.log(e||a))"
 ```
 
-Controlled experiment trên PowerShell:
+Controlled experiment:
 
-```powershell
+```bash
 docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
@@ -265,10 +285,7 @@ docker compose down
 docker compose up -d
 ```
 
-Kỳ vọng:
-
-- orders vẫn còn trong PostgreSQL (`order-data`);
-- stock đã giảm vẫn còn trong Redis (`catalog-data`).
+Kỳ vọng orders vẫn còn trong PostgreSQL (`order-data`) và stock đã giảm vẫn còn trong Redis (`catalog-data`). Ngrok URL có thể thay đổi sau khi tunnel/container được tạo lại.
 
 Reset sạch:
 
@@ -281,15 +298,13 @@ docker compose down -v
 # Files quan trọng
 
 ```text
-compose.yaml                 Case 1 — public Frontend/BFF, private backend
-compose.public.yaml          Case 2 — ngrok + gateway + public APIs
-gateway/nginx.conf           public routing + HTTPS redirect policy
+compose.yaml                     Case 1 — ngrok -> Frontend/BFF, private backend
+compose.public.yaml              Case 2 — ngrok -> Gateway -> FE + public APIs
+gateway/nginx.conf               Case 2 routing + HTTPS redirect policy
 frontend-service/Dockerfile.bff  Case 1 Node/Express BFF runtime
 frontend-service/Dockerfile      Case 2 static React/Nginx runtime
 frontend-service/server.js       BFF business contract
-ARCHITECTURE.md              giải thích kiến trúc và network boundary
-README-DEMO.md               command copy/paste cho buổi demo
-PRESENTATION-DEMO.md         flow trình bày ngắn
+ARCHITECTURE.md                  giải thích kiến trúc và network boundary
+README-DEMO.md                   command copy/paste cho buổi demo
+PRESENTATION-DEMO.md             flow trình bày ngắn
 ```
-
-> `.env` trong repo chỉ chứa demo DB credentials và để trống `NGROK_AUTHTOKEN`. Không commit real secrets trong production.
