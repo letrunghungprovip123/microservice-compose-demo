@@ -6,11 +6,13 @@ Một React UI nhưng có **hai runtime mode** tùy deployment.
 
 Build bằng `Dockerfile.bff`.
 
+Public flow:
+
 ```text
-Browser -> frontend-bff:3000 -> private Order/Catalog services
+Browser -> HTTPS ngrok -> frontend-bff:3000 -> private Order/Catalog services
 ```
 
-Runtime là Node.js/Express. Nó serve React bundle và cung cấp BFF contract:
+`frontend-bff:3000` là port nội bộ trong Docker network, không publish ra host. Runtime là Node.js/Express; nó serve React bundle và cung cấp BFF contract:
 
 ```text
 GET  /shop/products
@@ -19,13 +21,19 @@ POST /shop/checkout
 GET  /shop/system
 ```
 
-Không có generic `/api/*` proxy; `/api/*` trả 404 có chủ đích.
+Không có generic `/api/*` proxy; `/api/*` trả 404 có chủ đích. BFF nằm trên cả `edge-net` và `service-net`; ngrok chỉ nằm trên `edge-net`, còn backend chỉ giao tiếp qua `service-net`.
 
 ## Case 2 — public APIs
 
 Build bằng `Dockerfile`.
 
-Runtime là Nginx static server. Nó **không proxy backend API**. Public routing thuộc `gateway/nginx.conf`:
+Public flow:
+
+```text
+Browser/API client -> HTTPS ngrok -> Gateway
+```
+
+Runtime frontend là Nginx static server. Nó **không proxy backend API**. Public routing thuộc `gateway/nginx.conf`:
 
 ```text
 /                 -> frontend-service
