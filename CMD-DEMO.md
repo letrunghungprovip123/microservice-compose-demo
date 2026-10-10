@@ -1,36 +1,57 @@
 # Windows CMD Demo
 
-## Case 1 — private backend
+Trước khi chạy, điền `NGROK_AUTHTOKEN` vào `.env`.
+
+## Case 1 — ngrok -> Frontend/BFF, backend private
 
 ```cmd
 docker compose down -v
 docker compose up -d --build
 docker compose ps
+docker compose logs ngrok
+```
+
+Lấy URL HTTPS trong log, ví dụ:
+
+```text
+https://xxxx.ngrok.app
 ```
 
 Mở UI:
 
 ```cmd
-start http://localhost:3000
+start https://xxxx.ngrok.app
 ```
 
-BFF hoạt động:
+BFF contract hoạt động:
 
 ```cmd
-curl http://localhost:3000/shop/products
+curl https://xxxx.ngrok.app/shop/products
 ```
 
-Raw backend route qua frontend bị chặn:
+Raw backend route bị chặn:
 
 ```cmd
-curl http://localhost:3000/api/order/orders
+curl -i https://xxxx.ngrok.app/api/order/orders
+curl -i https://xxxx.ngrok.app/api/catalog/products
 ```
 
-Backend host ports không publish:
+Kỳ vọng `404`.
+
+Không có host-port bypass:
 
 ```cmd
+curl http://localhost:3000
 curl http://localhost:8002/products
 curl http://localhost:8003/orders
+```
+
+Kỳ vọng không connect.
+
+BFF vẫn gọi Catalog nội bộ:
+
+```cmd
+docker compose exec frontend-bff node -e "fetch('http://catalog-service:8002/products').then(r=>r.text()).then(console.log)"
 ```
 
 Business data:
@@ -72,16 +93,13 @@ Disconnect:
 docker network disconnect mini-shop-private_catalog-data-net %ORDER_ID%
 ```
 
-Persistence:
+Xong Case 1:
 
 ```cmd
 docker compose down
-docker compose up -d
 ```
 
-## Case 2 — ngrok + Gateway + public APIs
-
-Điền `NGROK_AUTHTOKEN` vào `.env`, sau đó:
+## Case 2 — ngrok -> Gateway -> FE + public APIs
 
 ```cmd
 docker compose -f compose.public.yaml down -v
@@ -102,6 +120,7 @@ Test:
 curl https://xxxx.ngrok.app/api/catalog/products
 curl https://xxxx.ngrok.app/api/order/orders
 curl https://xxxx.ngrok.app/gateway-info
+curl -i https://xxxx.ngrok.app/api/catalog/products
 ```
 
 Cleanup:
