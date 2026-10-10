@@ -86,8 +86,6 @@ services:
       PORT: 3000
       ORDER_SERVICE_URL: http://order-service:8003
       CATALOG_SERVICE_URL: http://catalog-service:8002
-    ports:
-      - "3000:3000"
     depends_on:
       order-service:
         condition: service_healthy
@@ -100,7 +98,20 @@ services:
       retries: 10
       start_period: 5s
     networks:
+      - edge-net
       - service-net
+    restart: unless-stopped
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: ["http", "frontend-bff:3000"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?Set NGROK_AUTHTOKEN in .env before starting private mode}
+    depends_on:
+      frontend-bff:
+        condition: service_healthy
+    networks:
+      - edge-net
     restart: unless-stopped
 
 volumes:
@@ -108,6 +119,7 @@ volumes:
   catalog-data:
 
 networks:
+  edge-net:
   service-net:
   order-data-net:
   catalog-data-net:
