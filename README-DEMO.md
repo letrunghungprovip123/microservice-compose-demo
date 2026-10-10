@@ -9,9 +9,17 @@ git clone https://github.com/letrunghungprovip123/microservice-compose-demo.git
 cd .\microservice-compose-demo
 ```
 
+Trước khi chạy **bất kỳ case nào**, đặt ngrok token trong `.env`:
+
+```env
+NGROK_AUTHTOKEN=your_real_token
+```
+
+Không push token thật lên GitHub.
+
 ---
 
-# CASE 1 — FE public, BE + DB private
+# CASE 1 — ngrok -> FE/BFF, BE + DB private
 
 ## Start sạch
 
@@ -19,48 +27,71 @@ cd .\microservice-compose-demo
 docker compose down -v
 docker compose up -d --build
 docker compose ps
+docker compose logs ngrok
 ```
 
-Mở UI:
+Tìm URL dạng:
+
+```text
+https://xxxx.ngrok.app
+```
+
+PowerShell:
 
 ```powershell
-Start-Process http://localhost:3000
+$base = "https://xxxx.ngrok.app"
+Start-Process $base
 ```
 
-macOS:
+macOS/Linux:
 
 ```bash
-open http://localhost:3000
+BASE="https://xxxx.ngrok.app"
+open "$BASE"
 ```
 
-## Chứng minh chỉ FE/BFF được publish
+## Chứng minh public entry chỉ đi vào BFF
+
+PowerShell:
 
 ```powershell
-curl.exe http://localhost:3000/health
-curl.exe http://localhost:3000/shop/products
+curl.exe "$base/health"
+curl.exe "$base/shop/products"
 ```
 
-Raw backend API qua FE bị chặn:
+Raw backend API qua public URL bị chặn ở BFF:
 
 ```powershell
-curl.exe http://localhost:3000/api/order/orders
+curl.exe -i "$base/api/order/orders"
+curl.exe -i "$base/api/catalog/products"
 ```
 
 Kỳ vọng `404`.
 
-Backend host ports không mở:
+Không có host port để bypass ngrok:
 
 ```powershell
+curl.exe http://localhost:3000
 curl.exe http://localhost:8002/products
 curl.exe http://localhost:8003/orders
 ```
 
-Kỳ vọng không connect.
+Kỳ vọng đều không connect.
 
 Nhưng BFF container gọi Catalog qua private Docker DNS được:
 
 ```powershell
 docker compose exec frontend-bff node -e "fetch('http://catalog-service:8002/products').then(r=>r.text()).then(console.log)"
+```
+
+Luồng cần nói:
+
+```text
+External user
+  -> HTTPS 443
+  -> ngrok
+  -> frontend-bff
+  -> private Order/Catalog
 ```
 
 ## Business flow
@@ -86,15 +117,13 @@ Xem stock trong Redis:
 docker compose exec redis redis-cli HGETALL product:1
 ```
 
-## Service DNS
+## Service DNS + datastore boundary
 
 Order thấy Catalog vì cùng `service-net`:
 
 ```powershell
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
 ```
-
-## Datastore boundary
 
 Order không thấy Redis:
 
@@ -112,41 +141,17 @@ Hai lỗi trên là kết quả mong muốn.
 
 ## Controlled network experiment
 
-Attach Order vào network của Redis:
-
 ```powershell
 docker network connect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
-```
-
-Chạy lại đúng lệnh DNS:
-
-```powershell
 docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
-```
-
-Bây giờ resolve thành công.
-
-Test TCP tới Redis:
-
-```powershell
 docker compose exec order-service python -c "import socket; s=socket.create_connection(('redis',6379),3); print('CONNECTED ->',s.getpeername()); s.close()"
-```
-
-Khôi phục boundary:
-
-```powershell
 docker network disconnect mini-shop-private_catalog-data-net $(docker compose ps -q order-service)
-```
-
-Chạy lại sẽ fail:
-
-```powershell
-docker compose exec order-service python -c "import socket; print(socket.gethostbyname('redis'))"
 ```
 
 ## Inspect networks
 
 ```powershell
+docker network inspect mini-shop-private_edge-net
 docker network inspect mini-shop-private_service-net
 docker network inspect mini-shop-private_order-data-net
 docker network inspect mini-shop-private_catalog-data-net
@@ -158,41 +163,27 @@ docker network inspect mini-shop-private_catalog-data-net
 docker compose down
 docker compose up -d
 docker compose ps
+docker compose logs ngrok
 ```
 
-Refresh UI. Order và stock vẫn còn vì PostgreSQL/Redis dùng named volumes.
+Order và stock vẫn còn vì PostgreSQL/Redis dùng named volumes. Ngrok URL có thể đổi sau khi tunnel được tạo lại.
 
-Reset sạch:
+Xong Case 1:
 
 ```powershell
-docker compose down -v
+docker compose down
 ```
 
 ---
 
-# CASE 2 — FE + public APIs qua HTTPS ngrok
+# CASE 2 — ngrok -> Gateway -> FE + public APIs
 
-## 1. Set ngrok token
-
-Mở `.env` và điền:
-
-```env
-NGROK_AUTHTOKEN=your_real_token
-```
-
-Không push token thật lên GitHub.
-
-## 2. Start
+## Start
 
 ```powershell
 docker compose -f compose.public.yaml down -v
 docker compose -f compose.public.yaml up -d --build
 docker compose -f compose.public.yaml ps
-```
-
-## 3. Lấy public HTTPS URL
-
-```powershell
 docker compose -f compose.public.yaml logs ngrok
 ```
 
@@ -202,19 +193,14 @@ Tìm URL dạng:
 https://xxxx.ngrok.app
 ```
 
-Gán nhanh trong PowerShell nếu muốn:
+PowerShell:
 
 ```powershell
 $base = "https://xxxx.ngrok.app"
-```
-
-## 4. Website public
-
-```powershell
 Start-Process $base
 ```
 
-## 5. Public backend APIs KHÔNG đi qua frontend
+## Public backend APIs KHÔNG đi qua frontend
 
 Catalog:
 
@@ -234,29 +220,38 @@ Gateway info:
 curl.exe "$base/gateway-info"
 ```
 
+Header routing proof:
+
+```powershell
+curl.exe -i "$base/api/catalog/products"
+curl.exe -i "$base/api/order/orders"
+```
+
+Kỳ vọng thấy `X-Demo-Route` cho biết Gateway route trực tiếp tới Catalog/Order.
+
 Luồng cần nói:
 
 ```text
-External client
-  -> HTTPS 443
-  -> ngrok
-  -> gateway
-  -> order-service OR catalog-service
+Website:
+Browser -> HTTPS 443 -> ngrok -> gateway -> frontend
+
+Public API:
+Postman/App -> HTTPS 443 -> ngrok -> gateway -> order/catalog
 ```
 
-Frontend không nằm trong request path của các API này.
+Frontend không nằm trong request path của public API.
 
-## 6. Create order trực tiếp bằng public API
+## Create order trực tiếp bằng public API
 
 ```powershell
 curl.exe -X POST "$base/api/order/orders" -H "Content-Type: application/json" -d '{"customer_name":"Nguyen Van An","customer_email":"an@example.com","product_id":1,"quantity":1}'
 ```
 
-> Nếu PowerShell của máy xử lý quote JSON khác, dùng UI hoặc Postman. Trên macOS/Linux command trên dùng được trực tiếp với `curl`.
+Nếu PowerShell của máy xử lý quote JSON khác, dùng UI hoặc Postman. Trên macOS/Linux command tương đương dùng `curl` bình thường.
 
-## 7. HTTPS enforcement
+## HTTPS enforcement
 
-Public URL chuẩn phải là:
+Public URL chuẩn:
 
 ```text
 https://xxxx.ngrok.app
@@ -264,7 +259,7 @@ https://xxxx.ngrok.app
 
 Gateway nhận `X-Forwarded-Proto` từ ngrok và redirect request có original scheme `http` sang HTTPS.
 
-## 8. Internal call vẫn không đi vòng ngrok
+## Internal call vẫn không đi vòng ngrok
 
 ```powershell
 docker compose -f compose.public.yaml exec order-service python -c "import socket; print(socket.gethostbyname('catalog-service'))"
@@ -272,18 +267,10 @@ docker compose -f compose.public.yaml exec order-service python -c "import socke
 
 Order gọi `catalog-service:8002` trực tiếp qua `service-net`.
 
-## 9. Cleanup Case 2
-
-Giữ volume:
+## Cleanup Case 2
 
 ```powershell
 docker compose -f compose.public.yaml down
-```
-
-Reset volume:
-
-```powershell
-docker compose -f compose.public.yaml down -v
 ```
 
 ---
@@ -292,12 +279,24 @@ docker compose -f compose.public.yaml down -v
 
 ```text
 CASE 1
-up -> UI -> /shop OK -> /api raw 404 -> :8002/:8003 fail
--> Order sees Catalog -> Order cannot see Redis
--> network connect -> sees Redis -> disconnect -> fail
+set token -> compose up -> logs ngrok
+-> open HTTPS URL
+-> /shop/products OK
+-> /api/* 404
+-> localhost:3000/:8002/:8003 fail
+-> BFF container gọi Catalog OK
 
 CASE 2
-set token -> public compose up -> logs ngrok
--> open HTTPS URL -> call /api/catalog directly
--> call /api/order directly -> explain Gateway, not Frontend
+public compose up -> logs ngrok
+-> open HTTPS URL
+-> /api/catalog OK
+-> /api/order OK
+-> header X-Demo-Route chứng minh Gateway route trực tiếp
+```
+
+Điểm chốt:
+
+```text
+Case 1: ngrok -> BFF -> private backend
+Case 2: ngrok -> Gateway -> FE OR public backend API
 ```
