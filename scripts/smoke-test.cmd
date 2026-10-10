@@ -1,17 +1,27 @@
 @echo off
 setlocal
 
-call :check "frontend BFF health" http://localhost:3000/health || exit /b 1
-call :check "BFF products" http://localhost:3000/shop/products || exit /b 1
-call :check "BFF orders" http://localhost:3000/shop/orders || exit /b 1
-call :check "BFF system" http://localhost:3000/shop/system || exit /b 1
+set BASE_URL=%~1
+if "%BASE_URL%"=="" set BASE_URL=%BASE_URL_ENV%
 
-call :expect_blocked "raw order API through frontend" http://localhost:3000/api/order/orders || exit /b 1
+if "%BASE_URL%"=="" (
+  echo Usage: scripts\smoke-test.cmd https://xxxx.ngrok.app
+  exit /b 2
+)
+
+call :check "frontend BFF health through ngrok" %BASE_URL%/health || exit /b 1
+call :check "BFF products through ngrok" %BASE_URL%/shop/products || exit /b 1
+call :check "BFF orders through ngrok" %BASE_URL%/shop/orders || exit /b 1
+call :check "BFF system through ngrok" %BASE_URL%/shop/system || exit /b 1
+
+call :expect_blocked "raw order API through public BFF" %BASE_URL%/api/order/orders || exit /b 1
+call :expect_blocked "raw catalog API through public BFF" %BASE_URL%/api/catalog/products || exit /b 1
+call :expect_blocked "frontend host port bypass" http://localhost:3000 || exit /b 1
 call :expect_blocked "catalog host port" http://localhost:8002/products || exit /b 1
 call :expect_blocked "order host port" http://localhost:8003/orders || exit /b 1
 
 echo.
-echo Private-mode smoke test passed.
+echo Private-mode ngrok smoke test passed.
 exit /b 0
 
 :check
